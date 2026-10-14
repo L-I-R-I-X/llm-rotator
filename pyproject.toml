@@ -35,8 +35,8 @@ dev = ["ruff>=0.6"]
 llm-rotator-discover = "llm_rotator.discovery:main"
 
 [project.urls]
-Homepage = "https://github.com/OWNER/llm-rotator"
-Repository = "https://github.com/OWNER/llm-rotator"
+Homepage = "https://github.com/L-I-R-I-X/llm-rotator"
+Repository = "https://github.com/L-I-R-I-X/llm-rotator"
 
 [tool.hatch.build.targets.wheel]
 packages = ["llm_rotator"]

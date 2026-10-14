@@ -15,7 +15,7 @@
 ## Установка
 
 ```bash
-pip install "llm-rotator @ git+https://github.com/OWNER/llm-rotator@v0.1.0"
+pip install "llm-rotator @ git+https://github.com/L-I-R-I-X/llm-rotator@v0.1.0"
 ```
 
 ## Быстрый старт
