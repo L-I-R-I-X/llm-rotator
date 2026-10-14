@@ -1,0 +1,28 @@
+# models/keys.toml — привязка ключей API к провайдерам и адресам.
+#
+# key_name — имя переменной в .env со значением ключа (значения тут не хранятся).
+# provider — имя провайдера из providers.toml.
+# proxies  — имена прокси из proxies.toml, через которые ходит ЭТОТ ключ;
+#            порядок = порядок ротации внутри ключа.
+
+[[keys]]
+key_name = "GROQ_API_KEY"
+provider = "groq"
+proxies = ["auto1", "auto2"]
+
+# Второй ключ того же провайдера — второй аккаунт на других адресах.
+[[keys]]
+key_name = "GROQ_API_KEY_2"
+provider = "groq"
+proxies = ["auto1", "auto2"]
+
+[[keys]]
+key_name = "OPENROUTER_API_KEY"
+provider = "openrouter"
+proxies = ["direct"]
+
+# Для auth = "none" имя — просто имя связки, значение в .env не читается.
+[[keys]]
+key_name = "OLLAMA_LOCAL"
+provider = "ollama"
+proxies = ["direct"]

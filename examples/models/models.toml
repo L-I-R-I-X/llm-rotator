@@ -1,0 +1,26 @@
+# models/models.toml — модели и порядок их провайдеров.
+#
+# Модель идентифицируется только по имени. Список providers — это и есть порядок
+# фейловера. prompt_profile и chat_history_pairs ротация читает, но не толкует:
+# это поля для вызывающего кода (сборка личности, окно истории).
+
+[[models]]
+model_name = "llama-3.3-70b-versatile"
+providers = ["groq"]
+context_window = 32768
+max_output_tokens = 4096
+prompt_profile = "full"
+
+# Одна и та же модель у двух провайдеров: сначала groq, при отказе — openrouter.
+[[models]]
+model_name = "meta-llama/llama-3.3-70b-instruct"
+providers = ["openrouter", "groq"]
+context_window = 32768
+max_output_tokens = 4096
+
+# Локальная модель без ключа.
+[[models]]
+model_name = "qwen2.5:7b"
+providers = ["ollama"]
+context_window = 32768
+prompt_profile = "core"

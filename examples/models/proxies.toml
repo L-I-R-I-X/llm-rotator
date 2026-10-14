@@ -1,0 +1,27 @@
+# models/proxies.toml — адреса, через которые можно достучаться до API.
+#
+# Имя прокси ([proxies.<имя>]) используется в keys.toml в списке `proxies` у
+# ключа. proxy_type — схема: "http" (по умолчанию), "https", "socks5", "socks5h".
+# rotates = true помечает адрес с ротацией выходных IP: такой адрес законно
+# обслуживает несколько ключей.
+
+[proxies.direct]
+proxy_name = "direct"
+proxy_address = ""
+
+[proxies.auto1]
+proxy_name = "auto1"
+proxy_address = "127.0.0.1:1091"
+proxy_type = "http"
+
+[proxies.auto2]
+proxy_name = "auto2"
+proxy_address = "127.0.0.1:1092"
+proxy_type = "http"
+
+# Для socks5 нужен пакет socksio (ставится с httpx[socks]).
+#
+# [proxies.socks1]
+# proxy_name = "socks1"
+# proxy_address = "127.0.0.1:1080"
+# proxy_type = "socks5"

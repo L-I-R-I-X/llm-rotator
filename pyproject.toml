@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llm-rotator"
+version = "0.1.0"
+description = "Ротация API-ключей, моделей и прокси для OpenAI-совместимых LLM-провайдеров"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "llm-rotator contributors" }]
+keywords = ["llm", "failover", "rotation", "openai", "httpx", "proxy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    # openai закреплён на 2.x: в 3.x библиотека переехала с httpx на httpx2,
+    # а per-proxy клиенты подставляются в OpenAI(http_client=...) напрямую.
+    "openai>=2.54,<3",
+    # httpx[socks] тянет socksio: без него адреса с proxy_type = "socks5" не работают.
+    "httpx[socks]>=0.28,<1",
+    "python-dotenv>=1.2",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6"]
+
+[project.scripts]
+llm-rotator-discover = "llm_rotator.discovery:main"
+
+[project.urls]
+Homepage = "https://github.com/OWNER/llm-rotator"
+Repository = "https://github.com/OWNER/llm-rotator"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llm_rotator"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+# EXE002: на некоторых ФС (в т.ч. общих монтированиях) файлам не снять
+# executable-бит, поэтому «executable without shebang» тут ничего не значит.
+ignore = ["EXE002"]

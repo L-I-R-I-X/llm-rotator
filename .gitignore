@@ -1,0 +1,21 @@
+# Секреты и состояние окружения — никогда в git.
+.env
+.env.*
+!.env.example
+
+# Сгенерированный кэш каталогов моделей.
+models/models.discovered.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Инструменты
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/

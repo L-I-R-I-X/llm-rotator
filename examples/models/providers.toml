@@ -1,0 +1,38 @@
+# models/providers.toml — провайдеры API ИИ-моделей.
+#
+# base_url      — куда отправлять запросы к модели.
+# models_url    — куда запрашивать список моделей.
+# api_style     — формат API ("openai" или адаптер вроде "google_native").
+# model_id_prefix — префикс, который провайдер добавляет к имени в каталоге, но
+#                 не ждёт в теле запроса (Google: models/gemini-... → gemini-...).
+# auth          — "bearer" (по умолчанию, ключ из .env) или "none" (без ключа).
+# extra_headers — дополнительные заголовки сверх Authorization.
+
+[providers.groq]
+provider_name = "groq"
+api_style = "openai"
+base_url = "https://api.groq.com/openai/v1"
+models_url = "https://api.groq.com/openai/v1/models"
+
+[providers.openrouter]
+provider_name = "openrouter"
+api_style = "openai"
+base_url = "https://openrouter.ai/api/v1"
+models_url = "https://openrouter.ai/api/v1/models"
+extra_headers = { "X-Title" = "llm-rotator-example" }
+
+[providers.google]
+provider_name = "google"
+api_style = "openai"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+models_url = "https://generativelanguage.googleapis.com/v1beta/openai/models"
+model_id_prefix = "models/"
+
+# Локальный сервер без ключа: значение ключа из .env не читается, запись в
+# keys.toml всё равно нужна — она закрепляет адрес.
+[providers.ollama]
+provider_name = "ollama"
+api_style = "openai"
+base_url = "http://127.0.0.1:11434/v1"
+models_url = "http://127.0.0.1:11434/v1/models"
+auth = "none"

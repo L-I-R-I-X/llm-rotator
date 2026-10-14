@@ -1,0 +1,13 @@
+# models/chains.toml — именованный порядок моделей: кто отвечает первым.
+#
+# Роль из .env ссылается на цепочку по имени: PERSONA_MODELCHAIN = "persona"
+# означает, что роль persona работает на цепочке persona.
+
+[[chains]]
+chain_name = "persona"
+models = [
+    "llama-3.3-70b-versatile",
+    "meta-llama/llama-3.3-70b-instruct",
+    "qwen2.5:7b",
+]
+description = "Основная: сильная модель, запас у второго провайдера, локальный резерв."
