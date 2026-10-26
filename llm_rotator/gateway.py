@@ -18,13 +18,17 @@
 смена адреса не съедает ключ. На каждой неудаче решается, что именно сломалось:
 
     401 / 402 / 403      →  сломан ключ    → следующий ключ
+    отказ «по сети»      →  адрес закрыт этим провайдером → следующий адрес
     404                  →  провайдер не подходит → следующий провайдер
     403 про квоту / 429  →  ключ жив, пауза → следующий ключ
     429 «request too large» → запрос велик → следующий провайдер модели
-    502 / 503 / 504      →  сломан адрес  → следующий адрес тем же ключом
-    таймаут / обрыв      →  сломан адрес  → следующий адрес тем же ключом
+    502 / 503 / 504      →  адрес закрыт этим провайдером → следующий адрес
+    таймаут / обрыв      →  сломан адрес (для всех) → следующий адрес тем же ключом
     прочие 5xx           →  модель недоступна → следующий провайдер модели
     400 / 422            →  запрос неверен → перебор бессмыслен, ошибка наверх
+
+Виноватый не выбывает до конца сессии, а уходит на паузу, которая растёт
+вдвое с каждым отказом подряд и сбрасывается успехом (SessionState.penalize).
 
 Обход ограничен TurnBudget: временем и числом попыток на весь ход, общих для
 всех моделей цепочки. Без предела три модели по шесть адресов — это до 72
@@ -34,7 +38,10 @@
 
 * 401/403 без структурированной ошибки провайдера (тело не JSON или не содержит
   поля error) — это не ключ, а блок посредника: Cloudflare/WAF/прокси. Такой
-  ответ означает заблокированный адрес, поэтому считается сломанным адресом.
+  ответ означает, что этот провайдер не пускает адрес (Failure.BLOCKED). Так
+  же — отказы «по сети» с настоящей JSON-ошибкой (NETWORK_BLOCK_WORDS): Groq
+  отвечает «Access denied. Please check your network settings.» кодом 403, и
+  по форме это отказ ключа, но тот же ключ через другой адрес проходит.
   Проверено на живых ключах: Groq отдаёт 200 на /models и 403 "error code: 1010"
   на /chat/completions — это бан адреса Cloudflare, а не ключа.
 
@@ -58,16 +65,17 @@
   следующему провайдеру из списка модели. Без структурированной ошибки 404
   остаётся фатальным — непонятно, чья это была ошибка.
 
-* 5xx не портит адреса. 502/503/504 и 522 говорят про посредника, их адрес и
-  ломает; 500, 501 и прочие — это ответ самого провайдера, и виноват адрес не
-  может. Раньше любой 5xx уводил адрес в bad_proxies до конца сессии, и одна
+* 5xx не портит адреса. 502/503/504 и 522 говорят про посредника между
+  адресом и этим провайдером — адрес закрывается только для него; 500, 501 и
+  прочие — это ответ самого провайдера, и виноват адрес не может. Раньше
+  любой 5xx уводил адрес в bad_proxies до конца сессии, и одна
   неудача Gemini на auto1 выводила из строя auto1, auto2 и так далее, пока
   адреса не кончались; теперь такие ответы означают «эта модель у провайдера
   не отвечает» и уводят обход к следующему провайдеру, ничего не запоминая.
 
-Сломанные ключи и адреса запоминаются в состоянии сессии, чтобы не перебирать
-их повторно для каждой следующей модели. Адрес `direct` в сломанные не попадает:
-обрыв через direct означает, что провайдер недоступен, а не адрес. Пометки
+Паузы ключей и адресов запоминаются в состоянии сессии, чтобы не перебирать
+их повторно для каждой следующей модели. Адрес `direct` целиком не выключается:
+обрыв через direct означает, что недоступен этот провайдер, а не адрес. Пометки
 «провайдер не подходит» стираются на новом диалоге (SessionState.forget_models):
 квота могла восстановиться, и новый чат должен снова попробовать модель.
 """
@@ -103,10 +111,29 @@ log = logging.getLogger(__name__)
 
 RATE_LIMIT_STATUS = 429
 DEFAULT_COOLDOWN = 60.0
+DEFAULT_BACKOFF_BASE = 120.0
+"""Первая пауза после отказа ключа или адреса, секунды. Дальше — вдвое дольше."""
+DEFAULT_BACKOFF_MAX = 3600.0
+"""Потолок паузы: раз в столько секунд сломанное всё равно пробуется снова."""
 PROBE_MODEL = "__probe__"
 ADDRESS_STATUSES = frozenset({502, 503, 504, 522})
 QUOTA_WORDS = ("quota", "rate limit", "rate_limit", "лимит", "квот")
 TOO_LARGE_WORDS = ("request too large", "reduce max_tokens", "expected output tokens")
+NETWORK_BLOCK_WORDS = (
+    "check your network settings",
+    "unsupported_country",
+    "country, region, or territory",
+    "location is not supported",
+    "not available in your country",
+    "not available in your region",
+)
+"""Отказы провайдера пустить запрос из этой сети — виноват адрес, а не ключ.
+
+Groq отвечает «Access denied. Please check your network settings.» кодом 403
+с настоящей JSON-ошибкой — по форме это отказ ключа. Проверено: тот же ключ
+через другой адрес проходит, а другой ключ через этот адрес получает тот же
+403. Gemini и OpenAI про регион отвечают похоже (иногда кодом 400).
+"""
 
 
 class Failure(Enum):
@@ -116,6 +143,7 @@ class Failure(Enum):
     KEY = "ключ"
     QUOTA = "пауза"
     PROXY = "адрес"
+    BLOCKED = "адрес закрыт провайдером"
     PROVIDER = "провайдер"
     MODEL = "модель"
     FATAL = "запрос"
@@ -166,28 +194,149 @@ class GatewayError(LLMError):
     attempts: tuple[Attempt, ...] = ()
 
 
+Target = tuple[str, ...]
+"""Чему назначают паузу: ("key", имя), ("proxy", имя) или ("route", адрес, провайдер)."""
+
+
+def key_target(name: str) -> Target:
+    return ("key", name)
+
+
+def proxy_target(name: str) -> Target:
+    return ("proxy", name)
+
+
+def route_target(proxy: str, provider: str) -> Target:
+    return ("route", proxy, provider)
+
+
+@dataclass(slots=True)
+class Penalty:
+    """Сколько раз подряд не сработало и до какого момента не трогаем."""
+
+    failures: int = 0
+    until: float = 0.0
+
+
 @dataclass(slots=True)
 class SessionState:
-    """Что уже признано нерабочим за время сессии."""
+    """Что сейчас не работает и сколько ещё к нему не обращаться.
 
-    bad_keys: set[str] = field(default_factory=set)
-    bad_proxies: set[str] = field(default_factory=set)
+    Сломанное не банится навсегда, а уходит на паузу, которая растёт вдвое с
+    каждым отказом подряд (`backoff_base`, `2·base`, `4·base`… до
+    `backoff_max`) и сбрасывается первым же успехом. У процесса, который живёт
+    неделями, «до конца сессии» значило бы «навсегда»: ночной сбой сети
+    выключал бы ключ до перезапуска.
+
+    Паузы — на трёх уровнях, потому что «кто виноват» бывает трёх видов:
+
+    - ключ (`key`): провайдер отверг сам ключ;
+    - адрес (`proxy`): до прокси не достучаться — он не работает ни с кем;
+    - адрес для провайдера (`route`): прокси жив, но этот провайдер его не
+      пускает (блок по IP или региону). С другим провайдером он может работать.
+
+    Квота — отдельно (`cooldown_keys`): ключ жив, пауза по `Retry-After`.
+    """
+
     cooldown_keys: dict[str, float] = field(default_factory=dict)
     unavailable: set[tuple[str, str]] = field(default_factory=set)
+    penalties: dict[Target, Penalty] = field(default_factory=dict)
+    backoff_base: float = DEFAULT_BACKOFF_BASE
+    backoff_max: float = DEFAULT_BACKOFF_MAX
+    clock: Callable[[], float] = time.monotonic
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    # --- паузы за отказы ----------------------------------------------------
+
+    def penalize(self, target: Target) -> float:
+        """Отказ: пауза вдвое длиннее прошлой (не больше потолка). Вернуть её."""
+        with self._lock:
+            penalty = self.penalties.setdefault(target, Penalty())
+            penalty.failures += 1
+            pause = min(
+                self.backoff_base * 2 ** (penalty.failures - 1), self.backoff_max
+            )
+            penalty.until = self.clock() + pause
+            return pause
+
+    def forgive(self, *targets: Target) -> None:
+        """Успех: паузы снимаются, следующая снова начнётся с минимальной."""
+        with self._lock:
+            for target in targets:
+                self.penalties.pop(target, None)
+
+    def blocked(self, target: Target) -> bool:
+        """Пауза ещё идёт."""
+        penalty = self.penalties.get(target)
+        return penalty is not None and self.clock() < penalty.until
+
+    def doubtful(self, target: Target) -> bool:
+        """Пауза кончилась, но удачи с тех пор не было: пробовать последним."""
+        penalty = self.penalties.get(target)
+        return penalty is not None and self.clock() >= penalty.until
+
+    def left(self, target: Target) -> float:
+        penalty = self.penalties.get(target)
+        return max(0.0, penalty.until - self.clock()) if penalty else 0.0
+
+    # --- что можно пробовать -----------------------------------------------
 
     def key_available(self, name: str) -> bool:
-        if name in self.bad_keys:
+        if self.blocked(key_target(name)):
             return False
         until = self.cooldown_keys.get(name)
         if until is None:
             return True
-        if time.monotonic() >= until:
-            del self.cooldown_keys[name]
+        if self.clock() >= until:
+            self.cooldown_keys.pop(name, None)
             return True
         return False
 
+    def proxy_available(self, proxy: str, provider: str) -> bool:
+        return not (
+            self.blocked(proxy_target(proxy))
+            or self.blocked(route_target(proxy, provider))
+        )
+
+    def binding_doubtful(self, binding: Binding, provider: str) -> bool:
+        """Связка, у которой что-то недавно не работало: её — после надёжных."""
+        proxy = binding.proxy.name
+        return any(
+            self.doubtful(target)
+            for target in (
+                key_target(binding.key_name),
+                proxy_target(proxy),
+                route_target(proxy, provider),
+            )
+        )
+
+    @property
+    def bad_keys(self) -> set[str]:
+        """Ключи на паузе за отказ (не за квоту)."""
+        return {t[1] for t in list(self.penalties) if t[0] == "key" and self.blocked(t)}
+
+    @property
+    def bad_proxies(self) -> set[str]:
+        """Адреса на паузе: недоступные вообще."""
+        return {
+            t[1] for t in list(self.penalties) if t[0] == "proxy" and self.blocked(t)
+        }
+
+    @property
+    def blocked_routes(self) -> set[tuple[str, str]]:
+        """Пары (адрес, провайдер) на паузе: провайдер не пускает этот адрес."""
+        return {
+            (t[1], t[2])
+            for t in list(self.penalties)
+            if t[0] == "route" and self.blocked(t)
+        }
+
+    # --- квота --------------------------------------------------------------
+
     def cool_down(self, name: str, seconds: float) -> None:
-        self.cooldown_keys[name] = time.monotonic() + seconds
+        self.cooldown_keys[name] = self.clock() + seconds
+
+    # --- провайдер без модели ---------------------------------------------
 
     def provider_available(self, provider: str, model_name: str) -> bool:
         return (provider, model_name) not in self.unavailable
@@ -199,8 +348,7 @@ class SessionState:
         """Снять пометки «провайдер не подходит» — начался новый диалог.
 
         Квота могла восстановиться, поэтому новый чат снова пробует все модели
-        цепочки с начала. Ключи и адреса остаются помеченными: если адрес не
-        отвечал, он не заработает и в следующем чате.
+        цепочки с начала. Паузы ключей и адресов остаются: они кончатся сами.
         """
         self.unavailable.clear()
 
@@ -208,25 +356,42 @@ class SessionState:
         """Сколько секунд ждать до ближайшего возврата ключа в ротацию."""
         if not self.cooldown_keys:
             return 0.0
-        return max(0.0, min(self.cooldown_keys.values()) - time.monotonic())
+        return max(0.0, min(self.cooldown_keys.values()) - self.clock())
 
     def retry_hint(self) -> str:
         """Человекочитаемая причина, почему попыток не было."""
         parts: list[str] = []
         if self.bad_keys:
-            parts.append(f"ключи помечены: {', '.join(sorted(self.bad_keys))}")
+            parts.append(f"ключи на паузе: {_with_left(self, 'key', self.bad_keys)}")
         if self.bad_proxies:
-            parts.append(f"адреса помечены: {', '.join(sorted(self.bad_proxies))}")
+            parts.append(
+                f"адреса на паузе: {_with_left(self, 'proxy', self.bad_proxies)}"
+            )
+        if self.blocked_routes:
+            routes = ", ".join(
+                f"{proxy} для {provider} ещё "
+                f"{self.left(route_target(proxy, provider)):.0f} с"
+                for proxy, provider in sorted(self.blocked_routes)
+            )
+            parts.append(f"провайдер не пускает адреса: {routes}")
         wait = self.waiting()
         if wait > 0:
-            parts.append(f"ключ на паузе ещё {wait:.0f} с")
+            parts.append(f"ключ на паузе по квоте ещё {wait:.0f} с")
         return "; ".join(parts)
 
     def usable_keys(self, names: Sequence[str]) -> list[str]:
         return [n for n in names if self.key_available(n)]
 
-    def usable_proxies(self, proxies: Sequence[Proxy]) -> list[Proxy]:
-        return [p for p in proxies if p.name not in self.bad_proxies]
+    def usable_proxies(
+        self, proxies: Sequence[Proxy], provider: str = ""
+    ) -> list[Proxy]:
+        return [p for p in proxies if self.proxy_available(p.name, provider)]
+
+
+def _with_left(state: SessionState, kind: str, names: set[str]) -> str:
+    return ", ".join(
+        f"{name} ещё {state.left((kind, name)):.0f} с" for name in sorted(names)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,11 +488,13 @@ def classify(response: httpx.Response) -> Failure:
     if is_too_large_error(response):
         return Failure.TOO_LARGE
     status = response.status_code
+    if status >= 400 and is_network_block(response):
+        return Failure.BLOCKED
     structured = provider_error(response)
     if status in (401, 403):
         if status == 403 and is_quota_error(response):
             return Failure.QUOTA
-        return Failure.KEY if structured else Failure.PROXY
+        return Failure.KEY if structured else Failure.BLOCKED
     if status == 402:
         return Failure.KEY
     if status == RATE_LIMIT_STATUS:
@@ -335,10 +502,16 @@ def classify(response: httpx.Response) -> Failure:
     if status == 404:
         return Failure.PROVIDER if structured else Failure.FATAL
     if status in ADDRESS_STATUSES:
-        return Failure.PROXY
+        return Failure.BLOCKED
     if status >= 500:
         return Failure.MODEL
     return Failure.FATAL
+
+
+def is_network_block(response: httpx.Response) -> bool:
+    """Провайдер не пускает запрос из этой сети (IP или регион адреса)."""
+    detail = error_detail(response).lower()
+    return any(word in detail for word in NETWORK_BLOCK_WORDS)
 
 
 def is_too_large_error(response: httpx.Response) -> bool:
@@ -466,9 +639,20 @@ class Gateway:
         client: httpx.Client | None = None,
         turn_deadline: float | None = None,
         turn_max_attempts: int | None = None,
+        backoff_base: float | None = None,
+        backoff_max: float | None = None,
     ) -> None:
         self.registry = registry if registry is not None else load_registry()
-        self.state = state if state is not None else SessionState()
+        if state is None:
+            state = SessionState(
+                backoff_base=_first(
+                    backoff_base, self.registry.backoff_base, DEFAULT_BACKOFF_BASE
+                ),
+                backoff_max=_first(
+                    backoff_max, self.registry.backoff_max, DEFAULT_BACKOFF_MAX
+                ),
+            )
+        self.state = state
         self.read_timeout = read_timeout
         self.connect_timeout = connect_timeout
         self.cooldown = cooldown
@@ -594,8 +778,14 @@ class Gateway:
             if not self.state.provider_available(provider, model_name):
                 continue
 
-            bindings = list(route.bindings)
-            index = _live(bindings, 0, self.state)
+            # Связки, у которых недавно что-то не работало, — после надёжных:
+            # иначе каждый ход ждал бы таймаута мёртвого адреса, чтобы
+            # убедиться, что он всё ещё мёртв.
+            bindings = sorted(
+                route.bindings,
+                key=lambda b: self.state.binding_doubtful(b, provider),
+            )
+            index = _live(bindings, 0, self.state, provider)
             while index < len(bindings):
                 reason = limit.exhausted()
                 if reason:
@@ -611,6 +801,12 @@ class Gateway:
                     " ← успех" if attempt.failure is Failure.NONE else "",
                 )
                 if attempt.failure is Failure.NONE:
+                    proxy = binding.proxy.name
+                    self.state.forgive(
+                        key_target(binding.key_name),
+                        proxy_target(proxy),
+                        route_target(proxy, provider),
+                    )
                     return Rotation(attempt=attempt, attempts=tuple(attempts))
 
                 self._remember(attempt)
@@ -638,11 +834,15 @@ class Gateway:
                         provider,
                     )
                     break
-                if attempt.failure is Failure.PROXY:
-                    index = _live(bindings, index + 1, self.state)
+                if attempt.failure in (Failure.PROXY, Failure.BLOCKED):
+                    index = _live(bindings, index + 1, self.state, provider)
                 else:
                     index = _live(
-                        bindings, index + 1, self.state, skip_key=binding.key_name
+                        bindings,
+                        index + 1,
+                        self.state,
+                        provider,
+                        skip_key=binding.key_name,
                     )
         raise self._fail(routes, attempts, limit.exhausted())
 
@@ -704,14 +904,28 @@ class Gateway:
         return error
 
     def _remember(self, attempt: Attempt) -> None:
+        """Назначить паузу тому, кто виноват в отказе.
+
+        Обрыв через `direct` — не поломка «адреса»: прямое соединение одно, и
+        выключить его целиком значило бы отрезать всех провайдеров. Такой
+        обрыв означает, что недоступен именно этот провайдер.
+        """
+        proxy, provider = attempt.proxy.name, attempt.provider
         if attempt.failure is Failure.KEY:
-            self.state.bad_keys.add(attempt.key_name)
+            target = key_target(attempt.key_name)
         elif attempt.failure is Failure.QUOTA:
             pause = max(self.cooldown, attempt.retry_after or 0.0)
             self.state.cool_down(attempt.key_name, pause)
-            log.info("ключ %s на паузе %.0f с", attempt.key_name, pause)
+            log.info("ключ %s на паузе по квоте %.0f с", attempt.key_name, pause)
+            return
         elif attempt.failure is Failure.PROXY and not attempt.proxy.is_direct:
-            self.state.bad_proxies.add(attempt.proxy.name)
+            target = proxy_target(proxy)
+        elif attempt.failure in (Failure.PROXY, Failure.BLOCKED):
+            target = route_target(proxy, provider)
+        else:
+            return
+        pause = self.state.penalize(target)
+        log.info("%s: пауза %.0f с (%s)", " ".join(target[1:]), pause, attempt)
 
     def _summary(
         self,
@@ -871,9 +1085,10 @@ def _live(
     bindings: list[Binding],
     start: int,
     state: SessionState,
+    provider: str = "",
     skip_key: str | None = None,
 ) -> int:
-    """Индекс следующей годной связки: ключ жив, адрес не помечен, ключ не пропускаемый."""
+    """Индекс следующей годной связки: ключ и адрес не на паузе, ключ не пропускаемый."""
     index = start
     while index < len(bindings):
         binding = bindings[index]
@@ -883,11 +1098,15 @@ def _live(
         if not state.key_available(binding.key_name):
             index += 1
             continue
-        if binding.proxy.name in state.bad_proxies:
+        if not state.proxy_available(binding.proxy.name, provider):
             index += 1
             continue
         return index
     return len(bindings)
+
+
+def _first(*values: float | None) -> float:
+    return next(value for value in values if value is not None)
 
 
 def _error_detail(error: dict | None) -> str:
@@ -923,10 +1142,16 @@ __all__ = [
     "GatewayError",
     "LLMError",
     "Rotation",
+    "Penalty",
     "SessionState",
+    "Target",
     "TurnBudget",
     "adapter_for",
     "classify",
     "error_detail",
+    "is_network_block",
+    "key_target",
     "provider_error",
+    "proxy_target",
+    "route_target",
 ]

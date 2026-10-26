@@ -25,6 +25,7 @@ from llm_rotator import (
     Registry,
     SessionState,
     classify,
+    key_target,
     load_registry,
 )
 from llm_rotator import discovery as md
@@ -137,9 +138,28 @@ class ClassifyTests(unittest.TestCase):
     def test_structured_403_is_key_problem(self):
         self.assertIs(classify(resp(403, KEY_ERROR)), Failure.KEY)
 
-    def test_unstructured_403_is_proxy_problem(self):
-        self.assertIs(classify(resp(403, text="error code: 1010")), Failure.PROXY)
-        self.assertIs(classify(resp(403, text="<html>blocked</html>")), Failure.PROXY)
+    def test_unstructured_403_is_a_blocked_address(self):
+        """Ответ посредника (Cloudflare, WAF): провайдер не пускает этот адрес."""
+        self.assertIs(classify(resp(403, text="error code: 1010")), Failure.BLOCKED)
+        self.assertIs(classify(resp(403, text="<html>blocked</html>")), Failure.BLOCKED)
+
+    def test_network_refusal_with_json_blames_the_address(self):
+        """Groq: 403 с JSON-ошибкой, но про сеть — виноват адрес, не ключ."""
+        groq = {
+            "error": {"message": "Access denied. Please check your network settings."}
+        }
+        self.assertIs(classify(resp(403, groq)), Failure.BLOCKED)
+        region = {
+            "error": {"message": "User location is not supported for the API use."}
+        }
+        self.assertIs(classify(resp(400, region)), Failure.BLOCKED)
+        openai = {
+            "error": {
+                "code": "unsupported_country_region_territory",
+                "message": "Country, region, or territory not supported",
+            }
+        }
+        self.assertIs(classify(resp(403, openai)), Failure.BLOCKED)
 
     def test_google_style_array_error_still_counts_as_provider_error(self):
         body = [{"error": {"code": 403, "message": "permission denied"}}]
@@ -163,9 +183,9 @@ class ClassifyTests(unittest.TestCase):
     def test_unstructured_404_is_fatal(self):
         self.assertIs(classify(resp(404, text="<html>404</html>")), Failure.FATAL)
 
-    def test_gateway_errors_blame_the_address(self):
+    def test_gateway_errors_blame_the_address_for_this_provider(self):
         for status in (502, 503, 504, 522):
-            self.assertIs(classify(resp(status)), Failure.PROXY)
+            self.assertIs(classify(resp(status)), Failure.BLOCKED)
 
     def test_provider_own_errors_blame_the_model(self):
         """500 приходит от самого провайдера: адрес ни при чём."""
@@ -200,7 +220,7 @@ class BindingTests(unittest.TestCase):
         gw = StubGateway(reg, [resp(503), resp(200, {"ok": 1})])
         fetch(gw, reg)
         self.assertEqual(gw.calls, ["K1@p1", "K1@p2"])
-        self.assertEqual(gw.state.bad_proxies, {"p1"})
+        self.assertEqual(gw.state.blocked_routes, {("p1", "p")})
         self.assertEqual(gw.state.bad_keys, set())
 
     def test_first_proxy_is_tried_first(self):
@@ -214,7 +234,7 @@ class BindingTests(unittest.TestCase):
         gw = StubGateway(reg, [resp(502), resp(503), resp(200, {"ok": 1})])
         fetch(gw, reg)
         self.assertEqual(gw.calls, ["K1@p1", "K1@p2", "K2@direct"])
-        self.assertEqual(gw.state.bad_proxies, {"p1", "p2"})
+        self.assertEqual(gw.state.blocked_routes, {("p1", "p"), ("p2", "p")})
 
     def test_500_does_not_mark_the_address_bad(self):
         """Главное: 500 не выводит адрес из строя, обход идёт к провайдеру."""
@@ -231,10 +251,12 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(gw.state.unavailable, set())
 
     def test_direct_never_marked_bad(self):
+        """Обрыв напрямую — недоступен провайдер, а не «адрес» для всех."""
         reg = make_registry(key_proxies=(("K1", ("direct", "p1")),))
         gw = StubGateway(reg, [httpx.ConnectError("boom"), resp(200, {"ok": 1})])
         fetch(gw, reg)
         self.assertNotIn("direct", gw.state.bad_proxies)
+        self.assertEqual(gw.state.blocked_routes, {("direct", "p")})
         self.assertEqual(gw.calls, ["K1@direct", "K1@p1"])
 
     def test_transport_error_is_proxy_problem(self):
@@ -250,7 +272,8 @@ class BindingTests(unittest.TestCase):
         )
         fetch(gw, reg)
         self.assertEqual(gw.calls, ["K1@p1", "K1@p2"])
-        self.assertEqual(gw.state.bad_proxies, {"p1"})
+        self.assertEqual(gw.state.blocked_routes, {("p1", "p")})
+        self.assertEqual(gw.state.bad_proxies, set())
         self.assertEqual(gw.state.bad_keys, set())
 
     def test_rate_limit_cools_down_instead_of_banning(self):
@@ -301,7 +324,8 @@ class BindingTests(unittest.TestCase):
     def test_no_attempts_when_everything_blacklisted(self):
         reg = make_registry(key_proxies=(("K1", ("p1",)), ("K2", ("p2",))))
         gw = StubGateway(reg, [])
-        gw.state.bad_keys.update({"K1", "K2"})
+        gw.state.penalize(key_target("K1"))
+        gw.state.penalize(key_target("K2"))
         with self.assertRaises(GatewayError) as ctx:
             fetch(gw, reg)
         self.assertIn("попыток не было", str(ctx.exception))

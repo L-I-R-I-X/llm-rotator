@@ -81,6 +81,8 @@ ROLE_SUFFIX = "_MODELCHAIN"
 
 TURN_DEADLINE_VAR = "LLM_TURN_DEADLINE"
 TURN_ATTEMPTS_VAR = "LLM_TURN_MAX_ATTEMPTS"
+BACKOFF_BASE_VAR = "LLM_BACKOFF_BASE"
+BACKOFF_MAX_VAR = "LLM_BACKOFF_MAX"
 """Пределы одного хода в .env: время в секундах и число попыток.
 
 Считаются на весь ход целиком, на все модели цепочки: без них три модели по
@@ -320,6 +322,8 @@ class Registry:
         roles: dict[str, str] | None = None,
         turn_deadline: float | None = None,
         turn_max_attempts: int | None = None,
+        backoff_base: float | None = None,
+        backoff_max: float | None = None,
     ) -> None:
         self.providers = providers
         self.proxies = proxies
@@ -331,6 +335,10 @@ class Registry:
         self.roles = roles or {}
         self.turn_deadline = turn_deadline
         self.turn_max_attempts = turn_max_attempts
+        self.backoff_base = backoff_base
+        """Первая пауза после отказа ключа или адреса (`LLM_BACKOFF_BASE`)."""
+        self.backoff_max = backoff_max
+        """Потолок паузы (`LLM_BACKOFF_MAX`)."""
 
     def provider(self, name: str) -> Provider:
         try:
@@ -870,6 +878,21 @@ def load_turn_limits(env: dict[str, str]) -> tuple[float | None, int | None]:
     return deadline, attempts
 
 
+def load_backoff(env: dict[str, str]) -> tuple[float | None, float | None]:
+    """Пауза после отказа ключа или адреса: первая и потолок, секунды.
+
+    Не задано — значения по умолчанию шлюза (2 минуты и час).
+    """
+    base = _env_float(env, BACKOFF_BASE_VAR)
+    ceiling = _env_float(env, BACKOFF_MAX_VAR)
+    if base is not None and ceiling is not None and ceiling < base:
+        raise ConfigError(
+            f"{ENV_FILE}: {BACKOFF_MAX_VAR} = {ceiling:g} меньше "
+            f"{BACKOFF_BASE_VAR} = {base:g} — потолок паузы ниже первой паузы"
+        )
+    return base, ceiling
+
+
 def _env_float(env: dict[str, str], name: str) -> float | None:
     raw = env.get(name)
     if raw is None:
@@ -1002,6 +1025,7 @@ def load_registry(base_dir: Path | None = None) -> Registry:
     env_keys = load_env_keys(base / ENV_FILE)
     roles = load_roles(env_keys, chains)
     turn_deadline, turn_max_attempts = load_turn_limits(env_keys)
+    backoff_base, backoff_max = load_backoff(env_keys)
 
     registry = Registry(
         providers=providers,
@@ -1013,6 +1037,8 @@ def load_registry(base_dir: Path | None = None) -> Registry:
         roles=roles,
         turn_deadline=turn_deadline,
         turn_max_attempts=turn_max_attempts,
+        backoff_base=backoff_base,
+        backoff_max=backoff_max,
     )
     warnings = _validate_credentials(registry)
     warnings += _shared_proxy_warnings(keys, proxies)

@@ -41,19 +41,27 @@ from .discovery import (
 )
 from .gateway import (
     API_STYLES,
+    DEFAULT_BACKOFF_BASE,
+    DEFAULT_BACKOFF_MAX,
     Attempt,
     Executor,
     Failure,
     Gateway,
     GatewayError,
     LLMError,
+    Penalty,
     Rotation,
     SessionState,
+    Target,
     TurnBudget,
     adapter_for,
     classify,
     error_detail,
+    is_network_block,
+    key_target,
     provider_error,
+    proxy_target,
+    route_target,
 )
 from .registry import (
     AUTH_STYLES,
@@ -83,6 +91,7 @@ from .registry import (
     Proxy,
     Registry,
     Route,
+    load_backoff,
     load_chains,
     load_env_keys,
     load_keys,
@@ -112,7 +121,7 @@ from .transport import (
     make_transport,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # registry
@@ -151,10 +160,19 @@ __all__ = [
     "load_proxies",
     "load_registry",
     "load_roles",
+    "load_backoff",
     "load_turn_limits",
     "resolve",
     # gateway
     "API_STYLES",
+    "DEFAULT_BACKOFF_BASE",
+    "DEFAULT_BACKOFF_MAX",
+    "Penalty",
+    "Target",
+    "is_network_block",
+    "key_target",
+    "proxy_target",
+    "route_target",
     "Attempt",
     "Executor",
     "Failure",
