@@ -445,6 +445,30 @@ if __name__ == "__main__":
 
 @unittest.skipUnless(
     __import__("os").environ.get("LLM_ROTATOR_POW_WASM"),
+    "нужен LLM_ROTATOR_POW_WASM=<путь к sha3_wasm_bg.7b9ca65ddd.wasm> и wasmtime",
+)
+class RealPowTests(unittest.TestCase):
+    """Настоящий WASM против пары challenge→answer, снятой живьём и сверенной
+    с эталоном `lib/pow.js` (FreeDeepseekAPI): ответ совпал (2026-11-03)."""
+
+    def test_known_pair(self):
+        import os
+
+        pair = json.loads(fixture("pow_pair.json"))
+        wasm = Path(os.environ["LLM_ROTATOR_POW_WASM"]).read_bytes()
+        http = httpx.Client(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, content=wasm))
+        )
+        answer = pow_module.solve(pair["challenge"], "https://w/real.wasm", http)
+        self.assertEqual(answer, pair["answer"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+@unittest.skipUnless(
+    __import__("os").environ.get("LLM_ROTATOR_POW_WASM"),
     "нужен LLM_ROTATOR_POW_WASM=<путь к sha3_wasm_bg.*.wasm> и пакет wasmtime",
 )
 class RealPowTests(unittest.TestCase):

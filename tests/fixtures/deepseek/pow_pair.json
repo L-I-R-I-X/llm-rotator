@@ -1,0 +1,13 @@
+{
+  "challenge": {
+    "algorithm": "DeepSeekHashV1",
+    "challenge": "f8438fffb2d5d9c02801b84bc51752511bfb266c706db59a89d220f4411a1dd5",
+    "salt": "71f8c93ada6065f961a0",
+    "difficulty": 144000,
+    "expire_at": 1793701783003,
+    "expire_after": 300000,
+    "target_path": "/api/v0/chat/completion"
+  },
+  "answer": 52418,
+  "wasm": "sha3_wasm_bg.7b9ca65ddd.wasm"
+}
