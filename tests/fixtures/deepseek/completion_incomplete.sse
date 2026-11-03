@@ -1,0 +1,10 @@
+event: ready
+data: {"request_message_id":9,"response_message_id":10,"model_type":"default"}
+
+data: {"v":{"response":{"message_id":10,"parent_id":9,"role":"ASSISTANT","status":"WIP","fragments":[{"id":2,"type":"RESPONSE","content":"Длинный ответ, который оборвался"}]}}}
+
+data: {"p":"response/status","o":"SET","v":"INCOMPLETE"}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+

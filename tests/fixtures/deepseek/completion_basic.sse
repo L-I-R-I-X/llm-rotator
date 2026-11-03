@@ -1,0 +1,22 @@
+event: ready
+data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}
+
+event: update_session
+data: {"updated_at":1762160000.0}
+
+data: {"v":{"response":{"message_id":2,"parent_id":1,"model":"","role":"ASSISTANT","thinking_enabled":false,"status":"WIP","fragments":[{"id":2,"type":"RESPONSE","content":"При"}]}}}
+
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":"вет"}
+
+data: {"v":", мир"}
+
+data: {"v":"!"}
+
+data: {"p":"response/status","o":"SET","v":"FINISHED"}
+
+event: finish
+data: {}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+

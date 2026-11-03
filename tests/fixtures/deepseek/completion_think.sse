@@ -1,0 +1,18 @@
+event: ready
+data: {"request_message_id":3,"response_message_id":4,"model_type":"default"}
+
+data: {"v":{"response":{"message_id":4,"parent_id":3,"role":"ASSISTANT","thinking_enabled":true,"status":"WIP","fragments":[{"id":2,"type":"THINK","content":"Нужно"}]}}}
+
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":" ответить"}
+
+data: {"v":" коротко."}
+
+data: {"p":"response/fragments","o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"Ответ"}]}
+
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":": 42"}
+
+data: {"p":"response/status","o":"SET","v":"FINISHED"}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+

@@ -1,0 +1,9 @@
+event: ready
+data: {"request_message_id":7,"response_message_id":8,"model_type":"default"}
+
+event: hint
+data: {"type":"error","clear_response":true,"content":"You've sent too many messages. Please try again later.","finish_reason":"rate_limit"}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+

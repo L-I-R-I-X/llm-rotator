@@ -1,0 +1,9 @@
+event: ready
+data: {"request_message_id":5,"response_message_id":6,"model_type":"default"}
+
+event: hint
+data: {"type":"error","clear_response":true,"content":"Сервер занят. Пожалуйста, повторите попытку позже.","finish_reason":"backend_busy"}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+
