@@ -1,0 +1,34 @@
+# Changelog
+
+## 0.3.0
+
+Веб-чаты как транспорты и режим сервиса. Формат 0.2.0 (`ModelRunner`,
+`load_registry`, TOML) не менялся; всё новое необязательно.
+
+### Добавлено
+* **DeepSeek Web** (`api_style = "deepseek_web"`, `auth = "web_session"`):
+  аккаунт вместо ключа, `key_file`, `max_concurrent`, секция
+  `[providers.X.web]`. PoW через WASM (`wasmtime`), разбор SSE, отказы внутри
+  HTTP 200 как нормальные `Failure`.
+* **Разговоры:** `ConversationHint(namespace, session)`; дельта в существующий
+  чат только при доказанном продолжении (исправляет «новый чат отвечает про
+  прошлый проект»).
+* **Уборка чатов:** фоновое удаление своих брошенных и простаивающих чатов
+  через ту же связку; очередь в SQLite переживает рестарт; `delete_policy`.
+* **Порядок связок** (affinity, давность, занятость), `Attempt.transient`,
+  пауза провайдера при `busy` сразу у двух аккаунтов.
+* **Большой контекст файлом** (`context.md`, вложения), кэш загрузок,
+  картинки (`images = true`).
+* **tool calling** для веб-чатов: промпт и терпимый разбор (JSON, DSML/XML).
+* **Сервис:** `llm-rotator serve` — `/v1/chat/completions` (stream, tools),
+  `/v1/models`, `/status`, `/health`, `/admin/reload`; клиенты с токенами и
+  пространствами имён; обход цепочек; сохранение пауз.
+* **`llm-rotator auth deepseek`** (Chromium через прокси связки) и
+  **`llm-rotator doctor`**.
+* `ChatResponse.first_token`, `ChatResponse.mode`, `StreamBase`.
+* Extras: `[web]`, `[server]`, `[auth]`.
+
+### Известные ограничения
+* Загруженные в аккаунт файлы удалить нельзя (эндпоинт не найден).
+* Anthropic `/v1/messages` не реализован.
+* Другие сайты (Qwen, DuckAI) и дублирующий запрос (hedging) — не сделаны.

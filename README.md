@@ -15,7 +15,10 @@
 ## Установка
 
 ```bash
-pip install "llm-rotator @ git+https://github.com/L-I-R-I-X/llm-rotator@v0.2.0"
+pip install "llm-rotator @ git+https://github.com/L-I-R-I-X/llm-rotator@v0.3.0"
+# extras: [web] — DeepSeek Web (wasmtime), [server] — HTTP-сервис,
+#         [auth] — вход в аккаунты (websockets)
+pip install "llm-rotator[web,server,auth] @ git+https://github.com/L-I-R-I-X/llm-rotator@v0.3.0"
 ```
 
 ## Быстрый старт
@@ -47,6 +50,7 @@ with ModelRunner(registry) as runner:
 | `models/keys.toml` | имя переменной из `.env` + провайдер + его прокси |
 | `models/models.toml` | модель, провайдеры (порядок фейловера), окно, `max_output_tokens` |
 | `models/chains.toml` | порядок моделей целиком (для надстройки ролями) |
+| `models/clients.toml` | клиенты сервиса: токен → пространство имён (только `serve`) |
 | `.env` | значения ключей, роли (`*_MODELCHAIN`), пределы хода |
 
 Значения ключей лежат **только** в `.env`; в TOML хранится имя переменной.
@@ -91,6 +95,94 @@ LLM_BACKOFF_BASE = 120    # первая пауза, секунды (по умо
 LLM_BACKOFF_MAX = 3600    # потолок паузы, секунды (по умолчанию 3600)
 ```
 
+## Веб-чаты (аккаунты вместо ключей)
+
+Кроме API-ключей ротатор умеет работать через **веб-чаты под аккаунтом**. Пока
+это DeepSeek Web (`api_style = "deepseek_web"`, `auth = "web_session"`); каждый
+сайт — отдельный транспорт.
+
+```toml
+# providers.toml
+[providers.deepseek_web]
+provider_name = "deepseek_web"
+api_style = "deepseek_web"
+base_url = "https://chat.deepseek.com"
+models_url = ""
+auth = "web_session"
+[providers.deepseek_web.web.models]
+"deepseek-web" = { thinking = false, search = false }
+
+# keys.toml — вместо имени переменной из .env файл сессии
+[[keys]]
+key_name = "DS_ONE"
+provider = "deepseek_web"
+key_file = "accounts/one.json"
+proxies = ["direct"]      # прокси закрепляется правкой этой строки
+```
+
+Полный список настроек (`inline_max_chars`, `first_event_timeout`,
+`chat_max_turns`, `delete_policy`, `images`, …) — в
+[`examples/models/providers.toml`](examples/models/providers.toml).
+
+Что делает веб-слой:
+
+* **Изоляция разговоров.** Запрос несёт `ConversationHint(namespace, session)`;
+  разговоры из разных пространств имён никогда не делят удалённый чат.
+  Дельта уходит в существующий чат, только если **доказано** продолжение
+  (ключи сообщений — строгий префикс запроса); иначе новый чат с полным
+  контекстом. `runner.complete(..., conversation=ConversationHint("hermes", "s1"))`.
+* **Уборка.** Ротатор удаляет свои брошенные и простаивающие чаты через ту же
+  связку (фоновый поток, очередь в SQLite `state/rotator.db`). Чужие чаты не
+  трогает. `delete_policy`: `abandoned` | `after_turn` | `never`.
+* **Быстрый уход с недоступного аккаунта.** Таймаут до первого события,
+  отказы внутри HTTP 200 (`INVALID_TOKEN`, `backend_busy`, лимиты) —
+  в нормальные `Failure`; порядок связок: где идёт разговор, затем самые
+  давно простаивавшие, затем занятые (`max_concurrent`).
+* **Большой контекст** уходит файлом (`context.md` и вложения), по `(аккаунт,
+  sha256)` грузится один раз; картинки — при `images = true`.
+* **tool calling** эмулируется промптом и терпимым разбором ответа.
+
+Файлы, загруженные в аккаунт, ротатор удалить не может (у сайта не нашлось
+доступного эндпоинта); чаты — может.
+
+## Вход в аккаунты и диагностика
+
+```bash
+llm-rotator auth deepseek DS_ONE   # Chromium через ПРОКСИ связки, вход руками
+llm-rotator doctor                 # прокси, токены, ключи; только чтение
+```
+
+`auth` держит отдельный профиль на ключ (`state/chrome/<key>`) и записывает
+файл сессии с правами 600. Прокси с логином и паролем Chrome во флаге не
+принимает — будет понятная ошибка. `doctor` помечает мёртвые аккаунты
+`needs_auth` и подсказывает команду перелогина.
+
+## Сервис (OpenAI-совместимый HTTP)
+
+```bash
+llm-rotator serve --base-dir /path/to/project [--host 127.0.0.1] [--port 9660]
+```
+
+| эндпоинт | |
+|---|---|
+| `POST /v1/chat/completions` | stream и обычный, `tools`; `model` — модель или `chain:<имя>` |
+| `GET /v1/models` | модели и цепочки (`chain:*`) |
+| `GET /status` | паузы, занятость, здоровье веб-аккаунтов, очередь чатов (без ключей и путей) |
+| `GET /health` | жив ли процесс |
+| `POST /admin/reload` | перечитать конфигурацию (loopback или `LLM_ROTATOR_ADMIN_TOKEN`) |
+
+Клиенты (`models/clients.toml`): каждому харнессу свой токен
+(`Authorization: Bearer …` или `x-api-key`) → своё пространство имён → свои
+удалённые чаты. Внутри клиента разговоры разводят `X-Session-Id` или поле
+`user`. Без `clients.toml` работает один клиент без токена, только с loopback.
+
+В ответе — заголовки `X-Rotator-Origin` (`модель | провайдер | ключ | прокси`) и
+`X-Rotator-Attempts`. Ошибки: `429` + `Retry-After`, если всё на паузе по
+квоте; `503` со сводкой по цепочке; `400` на плохой запрос. Паузы переживают
+перезапуск. Anthropic `/v1/messages` пока нет.
+
+Пример юнита systemd — [`deploy/llm-rotator.service`](deploy/llm-rotator.service).
+
 ## Опрос каталога моделей
 
 ```bash
@@ -107,15 +199,25 @@ llm-rotator-discover --merge    # дописать найденное в models/
 * `transport` — одна попытка на связке (OpenAI-совместимый слой).
 * `runner` — `ModelRunner`: вызов одной модели с обходом.
 * `discovery` — список моделей у провайдеров.
+* `web/` — веб-чаты: клиент и транспорт DeepSeek, планировщик хода, хранилище
+  (SQLite), уборщик чатов, эмуляция tools, вход через Chrome.
+* `service/` — HTTP-сервис: приложение, клиенты, цепочки, формат OpenAI.
+* `cli`, `doctor` — `llm-rotator serve | auth | doctor`.
 
 ## Разработка
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,web,server,auth]"
 ruff check .
 ruff format --check .
 python -m unittest discover -s tests -t .
 ```
+
+Живые тесты против настоящих аккаунтов (`tests/live/`) не запускаются сами:
+`LLM_ROTATOR_LIVE=1 LLM_ROTATOR_LIVE_ACCOUNTS=a.json,b.json python -m unittest
+tests.live.test_deepseek_live`. Они создают чаты только через ротатор и в
+конце удаляют их. PoW сверяется с эталоном при `LLM_ROTATOR_POW_WASM=<путь к
+sha3_wasm_bg.*.wasm>`.
 
 ## Лицензия
 
