@@ -389,7 +389,10 @@ class Registry:
         turn_max_attempts: int | None = None,
         backoff_base: float | None = None,
         backoff_max: float | None = None,
+        base_dir: Path | None = None,
     ) -> None:
+        self.base_dir = base_dir
+        """Каталог проекта (`models/`, `.env`, `state/`); `None` — текущий."""
         self.providers = providers
         self.proxies = proxies
         self.keys = keys
@@ -1311,6 +1314,7 @@ def load_registry(base_dir: Path | None = None) -> Registry:
         turn_max_attempts=turn_max_attempts,
         backoff_base=backoff_base,
         backoff_max=backoff_max,
+        base_dir=base,
     )
     warnings = _validate_credentials(registry)
     warnings += _shared_proxy_warnings(keys, proxies, providers)

@@ -38,7 +38,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import Protocol, Self
+from typing import TYPE_CHECKING, Protocol, Self
 
 import openai
 from httpx import HTTPError
@@ -53,6 +53,9 @@ from .gateway import (
     retry_after,
 )
 from .registry import Binding, ConfigError, Provider, Route
+
+if TYPE_CHECKING:
+    from .web.context import TransportContext
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +151,19 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationHint:
+    """Чей это разговор. Нужно веб-чатам, у которых состояние живёт на сайте.
+
+    Разговоры из разных `namespace` никогда не делят удалённый чат; `session`
+    разводит параллельные разговоры одного клиента. API-транспорты подсказку
+    игнорируют: у них состояния нет.
+    """
+
+    namespace: str = "default"
+    session: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ChatRequest:
     """Запрос к модели, общий для всех провайдеров маршрута.
 
@@ -163,6 +179,7 @@ class ChatRequest:
     messages: list[dict]
     params: Mapping[str, object] = field(default_factory=dict)
     read_timeout: float | None = None
+    conversation: ConversationHint | None = None
 
     def as_body(self) -> dict:
         return {
@@ -292,7 +309,37 @@ def _tool_call(call_id: str, name: str, raw: str) -> ToolCall:
     return ToolCall(id=call_id, name=name, arguments=parsed, raw_arguments=raw)
 
 
-class LiveStream:
+class StreamBase:
+    """Общее у живых потоков: и API-шного, и веб-чата.
+
+    Обход (`ModelRunner`) видит только это: итерация по `StreamChunk`, `text`,
+    `collect()`, `close()` и `attempts`, которые он дописывает после обхода.
+    """
+
+    origin: Origin
+    attempts: tuple[Attempt, ...] = ()
+
+    @property
+    def text(self) -> str:
+        raise NotImplementedError
+
+    def __iter__(self) -> Iterator[StreamChunk]:
+        raise NotImplementedError
+
+    def collect(self) -> ChatResponse:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+class LiveStream(StreamBase):
     """Живой поток ответа: итерация по дельтам плюс накопленное.
 
     Первый чанк уже получен — open_stream() вытягивает его, чтобы обход
@@ -393,19 +440,15 @@ class LiveStream:
         if self._on_close is not None:
             self._on_close(self)
 
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.close()
-
 
 class OpenAIChatTransport:
     """OpenAI-совместимый API: Groq, Google, OpenRouter, Ollama, vLLM, …"""
 
     api_styles: tuple[str, ...] = ("openai",)
 
-    def __init__(self, gateway: Gateway) -> None:
+    def __init__(
+        self, gateway: Gateway, context: TransportContext | None = None
+    ) -> None:
         self.gateway = gateway
         self._clients: dict[tuple[str, str, str, str], openai.OpenAI] = {}
         self._streams: set[LiveStream] = set()
@@ -621,10 +664,21 @@ def _reasoning(message: object) -> str:
     return ""
 
 
-TransportFactory = Callable[[Gateway], Transport]
+TransportFactory = Callable[[Gateway, "TransportContext | None"], Transport]
+
+
+def _deepseek_web(gateway: Gateway, context: TransportContext | None) -> Transport:
+    # Импорт здесь: веб-слой тянет wasmtime/sqlite только тем, кому он нужен.
+    from .web.deepseek.transport import DeepSeekWebTransport
+
+    if context is None:
+        raise ConfigError("DeepSeek Web нужен TransportContext (хранилище чатов)")
+    return DeepSeekWebTransport(gateway, context)
+
 
 TRANSPORTS: dict[str, TransportFactory] = {
     "openai": OpenAIChatTransport,
+    "deepseek_web": _deepseek_web,
 }
 """Способы отправки по Provider.api_style.
 
@@ -635,7 +689,9 @@ TRANSPORTS: dict[str, TransportFactory] = {
 """
 
 
-def make_transport(provider: Provider, gateway: Gateway) -> Transport:
+def make_transport(
+    provider: Provider, gateway: Gateway, context: TransportContext | None = None
+) -> Transport:
     try:
         factory = TRANSPORTS[provider.api_style]
     except KeyError:
@@ -643,7 +699,7 @@ def make_transport(provider: Provider, gateway: Gateway) -> Transport:
             f"Провайдер {provider.name!r}: отправлять запросы в стиле "
             f"{provider.api_style!r} нечем. Умею: {_styles()}"
         ) from None
-    return factory(gateway)
+    return factory(gateway, context)
 
 
 def _styles() -> str:
@@ -655,10 +711,12 @@ __all__ = [
     "TRANSPORTS",
     "ChatRequest",
     "ChatResponse",
+    "ConversationHint",
     "LiveStream",
     "OpenAIChatTransport",
     "Origin",
     "StreamBroken",
+    "StreamBase",
     "StreamChunk",
     "ToolCall",
     "Transport",

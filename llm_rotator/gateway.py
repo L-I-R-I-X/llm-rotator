@@ -958,6 +958,10 @@ class Gateway:
         if attempt.failure is Failure.KEY:
             target = key_target(attempt.key_name)
         elif attempt.failure is Failure.QUOTA:
+            if attempt.retry_after == 0.0:
+                # Явный «ноль»: ключ не виноват (веб-связка занята другим
+                # ходом). Идём к следующей связке, паузу не назначаем.
+                return
             pause = max(self.cooldown, attempt.retry_after or 0.0)
             self.state.cool_down(attempt.key_name, pause)
             log.info("ключ %s на паузе по квоте %.0f с", attempt.key_name, pause)

@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 from .gateway import (
     Binding,
@@ -34,10 +34,14 @@ from .registry import Provider, Registry, load_registry
 from .transport import (
     ChatRequest,
     ChatResponse,
-    LiveStream,
+    ConversationHint,
+    StreamBase,
     Transport,
     make_transport,
 )
+
+if TYPE_CHECKING:
+    from .web.context import TransportContext
 
 log = logging.getLogger(__name__)
 
@@ -56,19 +60,23 @@ class ModelRunner:
         gateway: Gateway | None = None,
         state: SessionState | None = None,
         transports: dict[str, Transport] | None = None,
+        context: TransportContext | None = None,
     ) -> None:
         """
         `registry` и `state` — необязательные: без них берутся из конфигурации
         базового каталога. `state` имеет смысл только когда шлюз не передан: у
         переданного шлюза своё состояние, и подмена ему ничего не даст.
         `transports` подменяет транспорты по api_style — это точка расширения
-        для тестов и несовместимых API.
+        для тестов и несовместимых API. `context` — общее состояние веб-чатов
+        (хранилище, пул клиентов); без него создаётся при первом обращении к
+        веб-провайдеру, в `state/` рядом с `models/`.
         """
         self.registry = registry if registry is not None else load_registry()
         self.gateway = (
             gateway if gateway is not None else Gateway(self.registry, state=state)
         )
         self._transports: dict[str, Transport] = dict(transports or {})
+        self._context = context
         self._closed = False
 
     def transport_for(self, provider: Provider) -> Transport:
@@ -80,9 +88,17 @@ class ModelRunner:
         """
         transport = self._transports.get(provider.api_style)
         if transport is None:
-            transport = make_transport(provider, self.gateway)
+            context = self._web_context() if provider.web is not None else None
+            transport = make_transport(provider, self.gateway, context)
             self._transports[provider.api_style] = transport
         return transport
+
+    def _web_context(self) -> TransportContext:
+        if self._context is None:
+            from .web.context import TransportContext
+
+            self._context = TransportContext.default(self.registry.base_dir)
+        return self._context
 
     def complete(
         self,
@@ -90,6 +106,7 @@ class ModelRunner:
         messages: Sequence[dict],
         *,
         read_timeout: float | None = None,
+        conversation: ConversationHint | None = None,
         **params: object,
     ) -> ChatResponse:
         """Вызвать одну модель, минуя цепочки ролей. Бросает GatewayError."""
@@ -97,7 +114,7 @@ class ModelRunner:
         response = self._send(
             self.registry.routes(model.name),
             model.name,
-            self._request(model.name, messages, read_timeout, params),
+            self._request(model.name, messages, read_timeout, params, conversation),
             self._executor,
         )
         assert isinstance(response, ChatResponse)
@@ -109,8 +126,9 @@ class ModelRunner:
         messages: Sequence[dict],
         *,
         read_timeout: float | None = None,
+        conversation: ConversationHint | None = None,
         **params: object,
-    ) -> LiveStream:
+    ) -> StreamBase:
         """Открыть поток ответа одной модели.
 
         Обход идёт до первого чанка: пока наружу не отдано ни одного символа,
@@ -121,10 +139,10 @@ class ModelRunner:
         response = self._send(
             self.registry.routes(model.name),
             model.name,
-            self._request(model.name, messages, read_timeout, params),
+            self._request(model.name, messages, read_timeout, params, conversation),
             self._executor_stream,
         )
-        assert isinstance(response, LiveStream)
+        assert isinstance(response, StreamBase)
         return response
 
     def send(
@@ -134,7 +152,7 @@ class ModelRunner:
         request: ChatRequest,
         executor_factory: Callable[[ChatRequest], Executor],
         budget: TurnBudget | None = None,
-    ) -> ChatResponse | LiveStream:
+    ) -> ChatResponse | StreamBase:
         """Обойти маршруты одной модели. Точка входа для надстройки цепочек."""
         return self._send(routes, model_name, request, executor_factory, budget)
 
@@ -144,9 +162,10 @@ class ModelRunner:
         messages: Sequence[dict],
         read_timeout: float | None,
         params: dict[str, object],
+        conversation: ConversationHint | None = None,
     ) -> ChatRequest:
         """Собрать тело запроса к модели: сообщения плюс потолок из конфига."""
-        return self._request(model_name, messages, read_timeout, params)
+        return self._request(model_name, messages, read_timeout, params, conversation)
 
     def _request(
         self,
@@ -154,6 +173,7 @@ class ModelRunner:
         messages: Sequence[dict],
         read_timeout: float | None,
         params: dict[str, object],
+        conversation: ConversationHint | None = None,
     ) -> ChatRequest:
         """Тело запроса к модели: сообщения плюс параметры из конфигурации.
 
@@ -171,6 +191,7 @@ class ModelRunner:
             messages=list(messages),
             params=params,
             read_timeout=read_timeout,
+            conversation=conversation,
         )
 
     def _send(
@@ -180,10 +201,10 @@ class ModelRunner:
         request: ChatRequest,
         executor_factory: Callable[[ChatRequest], Executor],
         budget: TurnBudget | None = None,
-    ) -> ChatResponse | LiveStream:
+    ) -> ChatResponse | StreamBase:
         rotation = self.gateway.rotate(routes, executor_factory(request), budget)
         response = rotation.payload
-        if not isinstance(response, (ChatResponse, LiveStream)):
+        if not isinstance(response, (ChatResponse, StreamBase)):
             raise TypeError(
                 f"{model_name}: транспорт вернул {type(response).__name__} вместо ответа"
             )
@@ -235,6 +256,8 @@ class ModelRunner:
         for transport in self._transports.values():
             transport.close()
         self._transports.clear()
+        if self._context is not None:
+            self._context.close()
         self.gateway.close()
 
     def __enter__(self) -> Self:
