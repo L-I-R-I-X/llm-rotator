@@ -30,6 +30,7 @@ auth = "web_session"
 
 [providers.deepseek_web.web]
 first_event_timeout = 30
+images = true
 
 [providers.deepseek_web.web.models]
 "deepseek-web" = { thinking = false, search = false }
@@ -164,7 +165,91 @@ class LiveDeepSeek(unittest.TestCase):
         final = self.ask(history, tools=TOOLS)
         self.assertIn("21", final.text)
 
-    def test_4_janitor_deletes_everything_we_created(self):
+    @staticmethod
+    def document(markers: int = 6, chars: int = 1_500_000) -> tuple[str, list[str]]:
+        import random
+
+        rng = random.Random(7)
+        words = [
+            "альфа",
+            "бета",
+            "гамма",
+            "дельта",
+            "сигма",
+            "омега",
+            "кварк",
+            "лептон",
+        ]
+        labels = [f"МЕТКА-{i + 1}-{rng.randrange(10**5):05d}" for i in range(markers)]
+        chunk = chars // markers
+        parts = []
+        for label in labels:
+            filler = " ".join(rng.choice(words) for _ in range(chunk // 7))
+            parts.append(f"{filler}\n{label}\n")
+        return "".join(parts), labels
+
+    def test_5_six_markers_in_1_5m_chars_as_history_file(self):
+        doc, labels = self.document()
+        self.assertGreater(len(doc), 1_200_000)
+        question = "Выпиши все метки вида МЕТКА-N-NNNNN из документа выше по порядку, по одной в строке."
+        response = self.ask(
+            [user("Вот документ:\n" + doc), assistant("Принял."), user(question)]
+        )
+        found = [label for label in labels if label in response.text]
+        self.assertEqual(found, labels, response.text)
+
+    def test_6_six_markers_in_one_huge_message(self):
+        doc, labels = self.document()
+        response = self.ask(
+            [
+                user(
+                    doc
+                    + "\nВыпиши все метки вида МЕТКА-N-NNNNN из этого текста по порядку, "
+                    "по одной в строке."
+                )
+            ]
+        )
+        found = [label for label in labels if label in response.text]
+        self.assertEqual(found, labels, response.text)
+
+    def test_7_image(self):
+        import base64
+        import struct
+        import zlib
+
+        def chunk(kind, data):
+            body = kind + data
+            return (
+                struct.pack(">I", len(data))
+                + body
+                + struct.pack(">I", zlib.crc32(body))
+            )
+
+        raw = b"".join(b"\x00" + b"\xff\x00\x00" * 64 for _ in range(64))  # красный
+        data = (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b"")
+        )
+        url = "data:image/png;base64," + base64.b64encode(data).decode()
+        response = self.ask(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Какого цвета эта картинка? Ответь одним словом.",
+                        },
+                        {"type": "image_url", "image_url": {"url": url}},
+                    ],
+                }
+            ]
+        )
+        self.assertIn("красн", response.text.lower())
+
+    def test_9_janitor_deletes_everything_we_created(self):
         from llm_rotator.web.janitor import Janitor
         from llm_rotator.web.store import ABANDONED
 

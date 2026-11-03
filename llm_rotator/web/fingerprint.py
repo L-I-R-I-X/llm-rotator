@@ -34,8 +34,11 @@ def has_images(message: Mapping) -> bool:
     )
 
 
-def content_text(content: object) -> str:
-    """Текст сообщения: части склеены, картинки заменены хешем."""
+def content_text(content: object, hide_images: bool = False) -> str:
+    """Текст сообщения: части склеены, картинки заменены меткой с хешем.
+
+    `hide_images` — картинки в чат не попадут: метка честно об этом говорит.
+    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -49,7 +52,11 @@ def content_text(content: object) -> str:
                 if part.get("type") in ("image_url", "image"):
                     image = part.get("image_url")
                     url = image.get("url") if isinstance(image, Mapping) else image
-                    parts.append(f"[image:{_digest(str(url))[:12]}]")
+                    parts.append(
+                        "[Image attached; not visible through this proxy]"
+                        if hide_images
+                        else f"[image:{_digest(str(url))[:12]}]"
+                    )
                 elif isinstance(part.get("text"), str):
                     parts.append(part["text"])
         return "".join(parts).strip()

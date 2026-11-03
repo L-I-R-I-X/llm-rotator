@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -75,6 +76,8 @@ class FakeDeepSeek:
         self.on_completion = None
         self.answers = 0
         self.replies: list[str] = []
+        self.uploads: list[dict] = []
+        self.upload_error: httpx.Response | None = None
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -87,6 +90,16 @@ class FakeDeepSeek:
         if path == "/api/v0/chat_session/delete":
             self.deleted.append(json.loads(request.content)["chat_session_id"])
             return httpx.Response(200, json=envelope({}))
+        if path == "/api/v0/file/upload_file":
+            if self.upload_error is not None:
+                return self.upload_error
+            raw = request.content
+            name = re.search(rb'filename="([^"]+)"', raw).group(1).decode()
+            self.uploads.append({"name": name, "body": raw})
+            return httpx.Response(
+                200,
+                json=envelope({"id": f"file-{len(self.uploads)}", "status": "SUCCESS"}),
+            )
         assert path == "/api/v0/chat/completion", path
         body = json.loads(request.content)
         self.completions.append(body)

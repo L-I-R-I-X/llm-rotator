@@ -226,6 +226,8 @@ class WebSettings:
     chat_idle_ttl: float = 7200.0
     """Брошенный по простою чат удаляется через столько секунд."""
     delete_policy: str = "abandoned"
+    images: bool = False
+    """Загружать картинки сообщений в чат. Выключено — модель увидит пометку."""
     models: tuple[tuple[str, WebModel], ...] = ()
 
     def model(self, name: str) -> WebModel | None:
@@ -774,6 +776,7 @@ _WEB_FIELDS = frozenset(
         "chat_max_chars",
         "chat_idle_ttl",
         "delete_policy",
+        "images",
         "models",
     }
 )
@@ -833,6 +836,7 @@ def _load_web(table: dict, where: str) -> WebSettings:
         chat_max_chars=_opt_int(table, "chat_max_chars", where, d.chat_max_chars),
         chat_idle_ttl=_opt_seconds(table, "chat_idle_ttl", where, d.chat_idle_ttl),
         delete_policy=policy,
+        images=_opt_bool(table, "images", where, d.images),
         models=tuple(models),
     )
 

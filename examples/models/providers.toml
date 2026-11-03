@@ -56,6 +56,7 @@ chat_max_turns = 100          # потом новый удалённый чат
 chat_max_chars = 600000       # суммарно в удалённом чате, потом новый
 chat_idle_ttl = 7200          # сек: брошенный по простою чат удаляется
 delete_policy = "abandoned"   # "abandoned" | "after_turn" | "never"
+images = false                # true — загружать картинки (data URL) в чат
 
 # Каждая модель из models.toml, ссылающаяся на этого провайдера, описана здесь.
 [providers.deepseek_web.web.models]

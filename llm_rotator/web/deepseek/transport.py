@@ -232,7 +232,6 @@ class DeepSeekWebTransport:
         committed = False
         try:
             settings = self._settings(route)
-            self._reject_unsupported(request)
             tools = self._tools(request)
             hint = request.conversation
             namespace = hint.namespace if hint else "default"
@@ -258,7 +257,9 @@ class DeepSeekWebTransport:
                 tools=tools,
             )
             record = plan.chat
-            self._check_size(plan, settings)
+            if plan.too_large:
+                raise WebError("too_large", plan.too_large)
+            refs = self._upload(client, key, plan.attachments)
 
             def fresh() -> ChatRecord:
                 chat_id = client.create_chat()
@@ -279,7 +280,7 @@ class DeepSeekWebTransport:
             else:
                 assert record is not None
                 prompt, parent = plan.prompt, record.parent_message_id
-            events = client.complete(record.chat_id, parent, prompt, flags=flags)
+            events = client.complete(record.chat_id, parent, prompt, refs, flags=flags)
             try:
                 first = next(events)
             except WebError as exc:
@@ -289,8 +290,11 @@ class DeepSeekWebTransport:
                 # в той же попытке.
                 context.store.set_state(route.provider.name, record.chat_id, ABANDONED)
                 record = fresh()
+                if plan.full_too_large():
+                    raise WebError("too_large", plan.full_reason)
+                refs = self._upload(client, key, plan.full_attachments)
                 events = client.complete(
-                    record.chat_id, None, plan.full_prompt, flags=flags
+                    record.chat_id, None, plan.full_prompt, refs, flags=flags
                 )
                 prompt = plan.full_prompt
                 first = next(events)
@@ -403,19 +407,20 @@ class DeepSeekWebTransport:
                 provider, hint_ns, hint_session, fp.first_key, record.chat_id
             )
 
-    @staticmethod
-    def _reject_unsupported(request: ChatRequest) -> None:
-        if any(fp_module.has_images(m) for m in request.messages):
-            raise WebError("bad_request", "картинки для веб-чатов ещё не реализованы")
-
-    @staticmethod
-    def _check_size(plan: TurnPlan, settings: WebSettings) -> None:
-        if len(plan.prompt) > settings.inline_max_chars:
-            raise WebError(
-                "too_large",
-                f"контекст {len(plan.prompt)} символов больше inline_max_chars "
-                f"({settings.inline_max_chars}); отправка файлом — этап 6",
-            )
+    def _upload(self, client, key: str, attachments) -> list[str]:
+        """Файлы хода — на аккаунт связки. Одинаковое содержимое грузим один раз."""
+        store = self.context.store
+        ids: list[str] = []
+        for attachment in attachments:
+            digest = attachment.sha256
+            file_id = store.cached_file(key, digest)
+            if file_id is None:
+                file_id = client.upload_file(
+                    attachment.name, attachment.data, attachment.mime
+                )
+                store.remember_file(key, digest, file_id)
+            ids.append(file_id)
+        return ids
 
     # --- Attempt ------------------------------------------------------------
 
