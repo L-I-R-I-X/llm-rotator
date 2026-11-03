@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -23,6 +24,7 @@ from ...transport import (
     StreamBase,
     StreamBroken,
     StreamChunk,
+    ToolCall,
     Usage,
 )
 from .. import fingerprint as fp_module
@@ -30,6 +32,13 @@ from ..context import TransportContext
 from ..errors import WebError, to_failure
 from ..planner import TurnPlan, plan_turn
 from ..store import ABANDONED, ACTIVE, BUSY, ChatRecord
+from ..tools import (
+    format_retry_prompt,
+    known_call,
+    looks_like_tool_call_markup,
+    new_call_id,
+    parse_tool_call,
+)
 from .account import Account, load_account
 from .client import DeepSeekClient
 from .sse import Delta, Event, Finish, Ready
@@ -47,6 +56,8 @@ class _Outcome:
         self.reasoning: list[str] = []
         self.finish_reason = ""
         self.message_id: int | str | None = None
+        self.tool_calls: tuple[ToolCall, ...] = ()
+        self.extra_chars = 0
         self.first_token = 0.0
         self.started = time.monotonic()
 
@@ -67,6 +78,7 @@ class _Outcome:
         return ChatResponse(
             origin=origin,
             text="".join(self.text),
+            tool_calls=self.tool_calls,
             finish_reason=self.finish_reason,
             usage=Usage(),
             latency=time.monotonic() - self.started,
@@ -221,6 +233,7 @@ class DeepSeekWebTransport:
         try:
             settings = self._settings(route)
             self._reject_unsupported(request)
+            tools = self._tools(request)
             hint = request.conversation
             namespace = hint.namespace if hint else "default"
             session = hint.session if hint else ""
@@ -242,7 +255,7 @@ class DeepSeekWebTransport:
                 namespace=namespace,
                 session=session,
                 messages=request.messages,
-                tools=request.params.get("tools"),
+                tools=tools,
             )
             record = plan.chat
             self._check_size(plan, settings)
@@ -281,9 +294,16 @@ class DeepSeekWebTransport:
                 )
                 prompt = plan.full_prompt
                 first = next(events)
-            yield first
-            yield from events
-            if not outcome.text:
+            if tools:
+                # Вызов инструмента нельзя отдавать по кускам: сначала ответ
+                # целиком, потом разбор (и при необходимости уточнение).
+                yield from self._tool_turn(
+                    client, record, first, events, flags, tools, outcome
+                )
+            else:
+                yield first
+                yield from events
+            if not outcome.text and not outcome.tool_calls:
                 raise WebError("empty", "ответ без текста")
             self._commit(route, plan, record, prompt, outcome, settings)
             committed = True
@@ -294,6 +314,57 @@ class DeepSeekWebTransport:
             context.busy.release(key)
             if record is not None:
                 context.wake()  # брошенное (или after_turn) — пусть уберут
+
+    @staticmethod
+    def _tools(request: ChatRequest) -> object:
+        """Инструменты запроса; `tool_choice="none"` — как будто их нет."""
+        if request.params.get("tool_choice") == "none":
+            return None
+        return request.params.get("tools") or None
+
+    @staticmethod
+    def _drain(first: Event, events: Iterator[Event]) -> _Outcome:
+        local = _Outcome()
+        local.absorb(first)
+        for event in events:
+            local.absorb(event)
+        return local
+
+    def _tool_turn(
+        self, client, record, first, events, flags, tools, outcome: _Outcome
+    ) -> Iterator[Event]:
+        local = self._drain(first, events)
+        text = "".join(local.text)
+        call = known_call(parse_tool_call(text), tools)
+        if call is None and looks_like_tool_call_markup(text):
+            # Разметка битая. Просим повторить В ТОМ ЖЕ чате: новый чат ради
+            # этого был бы ещё одним следом в аккаунте (R1).
+            retry_prompt = format_retry_prompt()
+            stream = client.complete(
+                record.chat_id, local.message_id, retry_prompt, flags=flags
+            )
+            again = self._drain(next(stream), stream)
+            again.extra_chars = local.extra_chars + len(retry_prompt) + len(text)
+            local = again
+            text = "".join(local.text)
+            call = known_call(parse_tool_call(text), tools)
+        outcome.message_id = local.message_id
+        outcome.reasoning = local.reasoning
+        outcome.extra_chars = local.extra_chars
+        if call is not None:
+            outcome.tool_calls = (
+                ToolCall(
+                    id=new_call_id(),
+                    name=call.name,
+                    arguments=call.arguments,
+                    raw_arguments=json.dumps(call.arguments, ensure_ascii=False),
+                ),
+            )
+            outcome.finish_reason = "tool_calls"
+            yield Finish("tool_calls")
+            return
+        yield Delta(text)
+        yield Finish(local.finish_reason or "stop")
 
     def _commit(
         self,
@@ -306,8 +377,14 @@ class DeepSeekWebTransport:
     ) -> None:
         text = "".join(outcome.text)
         fp = plan.fingerprint
-        sent = (*fp.request_keys, fp_module.reply_key(text))
-        added = len(prompt) + len(text) + len("".join(outcome.reasoning))
+        calls = [(c.name, dict(c.arguments)) for c in outcome.tool_calls]
+        sent = (*fp.request_keys, fp_module.reply_key(text, calls))
+        added = (
+            len(prompt)
+            + len(text)
+            + len("".join(outcome.reasoning))
+            + outcome.extra_chars
+        )
         provider = route.provider.name
         store = self.context.store
         store.finish_turn(
@@ -328,10 +405,6 @@ class DeepSeekWebTransport:
 
     @staticmethod
     def _reject_unsupported(request: ChatRequest) -> None:
-        if request.params.get("tools"):
-            raise WebError(
-                "bad_request", "tool calling для веб-чатов ещё не реализован (этап 5)"
-            )
         if any(fp_module.has_images(m) for m in request.messages):
             raise WebError("bad_request", "картинки для веб-чатов ещё не реализованы")
 
@@ -365,6 +438,7 @@ class DeepSeekWebTransport:
         status: int | None = None,
         detail: str = "",
         retry_after: float | None = None,
+        transient: bool = False,
     ) -> Attempt:
         return Attempt(
             model=route.model.name,
@@ -375,15 +449,26 @@ class DeepSeekWebTransport:
             status=status,
             detail=detail,
             retry_after=retry_after,
+            transient=transient,
         )
 
     def _failed(self, route: Route, binding: Binding, error: WebError) -> Attempt:
         if error.kind == "busy_slot":
             # Не отказ аккаунта: он просто занят. Идём дальше без штрафа.
             return self._attempt(
-                route, binding, Failure.QUOTA, detail=BUSY_DETAIL, retry_after=0.0
+                route,
+                binding,
+                Failure.QUOTA,
+                detail=BUSY_DETAIL,
+                retry_after=0.0,
+                transient=True,
             )
         failure, retry_after = to_failure(error)
+        if failure is Failure.PROXY and binding.proxy.is_direct:
+            # Молчит аккаунт или сайт, а не «адрес»: прямое соединение общее
+            # для всех аккаунтов, и штрафовать его значило бы отрезать и те,
+            # что работают. Ставим на паузу только эту связку.
+            failure, retry_after = Failure.QUOTA, 30.0
         provider = route.provider.name
         if error.kind == "auth":
             self.context.store.mark_account(

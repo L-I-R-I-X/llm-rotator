@@ -23,6 +23,7 @@ from .fingerprint import (
     tool_names,
 )
 from .store import BUSY, ChatRecord, ConversationStore
+from .tools import format_tool_definitions, format_tool_reminder
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +86,7 @@ def join_prompt(system: str, conversation: str) -> str:
     return f"{system}\n\n{conversation}" if system else conversation
 
 
-def plan_turn(
+def find_continuation(
     store: ConversationStore,
     settings: WebSettings,
     *,
@@ -93,17 +94,12 @@ def plan_turn(
     key_name: str,
     namespace: str,
     session: str,
-    messages: Sequence[Mapping],
-    tools: object = None,
-) -> TurnPlan:
-    fp = fingerprint(messages, tools)
-    names = tool_names(messages)
-    body = [m for m in messages if not is_system(m)]
-    full = join_prompt(render_system(messages), render_conversation(body, names))
+    fp: Fingerprint,
+) -> ChatRecord | None:
+    """Чат этого аккаунта, который доказуемо содержит начало разговора.
 
-    def plan(kind: str, prompt: str = full, **extra) -> TurnPlan:
-        return TurnPlan(kind, prompt, full, fp, **extra)
-
+    Ничего не занимает: годится и для выбора связки (affinity), и для плана.
+    """
     best: ChatRecord | None = None
     request = fp.request_keys
     for record in store.candidates(provider, key_name, namespace, session):
@@ -118,6 +114,41 @@ def plan_turn(
             continue
         if best is None or n > len(best.sent_keys):
             best = record
+    return best
+
+
+def plan_turn(
+    store: ConversationStore,
+    settings: WebSettings,
+    *,
+    provider: str,
+    key_name: str,
+    namespace: str,
+    session: str,
+    messages: Sequence[Mapping],
+    tools: object = None,
+) -> TurnPlan:
+    fp = fingerprint(messages, tools)
+    names = tool_names(messages)
+    body = [m for m in messages if not is_system(m)]
+    system = (
+        render_system(messages)
+        + format_tool_definitions(tools, settings.inline_max_chars)
+    ).strip()
+    full = join_prompt(system, render_conversation(body, names))
+
+    def plan(kind: str, prompt: str = full, **extra) -> TurnPlan:
+        return TurnPlan(kind, prompt, full, fp, **extra)
+
+    best = find_continuation(
+        store,
+        settings,
+        provider=provider,
+        key_name=key_name,
+        namespace=namespace,
+        session=session,
+        fp=fp,
+    )
     if best is None:
         return plan("full")
     if best.state == BUSY:
@@ -130,4 +161,9 @@ def plan_turn(
     if not store.claim(provider, best.chat_id):
         return plan("full", ephemeral=True)
     tail = render_conversation(body[len(best.sent_keys) :], names)
+    reminder = format_tool_reminder(tools)
+    if reminder:
+        # Полная инструкция лежит в начале чата; без напоминания модель
+        # постепенно уходит от формата и отвечает блоками кода.
+        tail = f"{tail}\n\n{reminder}"
     return plan("delta", tail, chat=best)

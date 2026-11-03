@@ -213,6 +213,7 @@ class ModelRunner:
         executor_factory: Callable[[ChatRequest], Executor],
         budget: TurnBudget | None = None,
     ) -> ChatResponse | StreamBase:
+        routes = self._order_web_bindings(routes, request)
         rotation = self.gateway.rotate(routes, executor_factory(request), budget)
         response = rotation.payload
         if not isinstance(response, (ChatResponse, StreamBase)):
@@ -223,6 +224,58 @@ class ModelRunner:
             return replace(response, attempts=rotation.failed)
         response.attempts = rotation.failed
         return response
+
+    def _order_web_bindings(
+        self, routes: Sequence[Route], request: ChatRequest
+    ) -> Sequence[Route]:
+        """Порядок связок веб-провайдеров: где уже идёт этот разговор, затем
+        самые давно простаивавшие свободные, затем занятые.
+
+        Без этого весь трафик шёл бы в первый аккаунт из keys.toml. `rotate`
+        сам переставляет «сомнительные» связки назад стабильной сортировкой,
+        так что наш порядок среди надёжных сохраняется.
+        """
+        if self._context is None or not any(r.provider.web for r in routes):
+            return routes
+        from .web.fingerprint import fingerprint
+        from .web.planner import find_continuation
+
+        busy = self._context.busy
+        store = self._context.store
+        hint = request.conversation
+        namespace = hint.namespace if hint else "default"
+        session = hint.session if hint else ""
+        fp = fingerprint(request.messages, request.params.get("tools"))
+        ordered: list[Route] = []
+        for route in routes:
+            web = route.provider.web
+            if web is None or len(route.bindings) < 2:
+                ordered.append(route)
+                continue
+
+            def rank(binding: Binding, route: Route = route, web=web) -> tuple:
+                free = busy.is_free(binding.key_name, binding.max_concurrent)
+                affine = free and (
+                    find_continuation(
+                        store,
+                        web,
+                        provider=route.provider.name,
+                        key_name=binding.key_name,
+                        namespace=namespace,
+                        session=session,
+                        fp=fp,
+                    )
+                    is not None
+                )
+                return (
+                    0 if affine else 1 if free else 2,
+                    busy.last_used(binding.key_name),
+                )
+
+            ordered.append(
+                replace(route, bindings=tuple(sorted(route.bindings, key=rank)))
+            )
+        return ordered
 
     def _executor(self, request: ChatRequest) -> Executor:
         def attempt(route: Route, binding: Binding):

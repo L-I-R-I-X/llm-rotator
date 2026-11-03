@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import threading
+import time
 
 
 class BusyTracker:
     def __init__(self) -> None:
         self._counts: dict[str, int] = {}
+        self._last_used: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def acquire(self, key_name: str, limit: int | None) -> bool:
@@ -17,6 +19,7 @@ class BusyTracker:
             if limit is not None and used >= limit:
                 return False
             self._counts[key_name] = used + 1
+            self._last_used[key_name] = time.monotonic()
             return True
 
     def release(self, key_name: str) -> None:
@@ -26,6 +29,15 @@ class BusyTracker:
                 self._counts[key_name] = left
             else:
                 self._counts.pop(key_name, None)
+
+    def last_used(self, key_name: str) -> float:
+        """Когда связку занимали в последний раз; 0 — ещё не занимали."""
+        with self._lock:
+            return self._last_used.get(key_name, 0.0)
+
+    def is_free(self, key_name: str, limit: int | None) -> bool:
+        with self._lock:
+            return limit is None or self._counts.get(key_name, 0) < limit
 
     def count(self, key_name: str) -> int:
         with self._lock:

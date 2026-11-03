@@ -74,6 +74,7 @@ class FakeDeepSeek:
         self.fail_with: httpx.Response | None = None
         self.on_completion = None
         self.answers = 0
+        self.replies: list[str] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -99,9 +100,10 @@ class FakeDeepSeek:
                 json=envelope(None, 1, "invalid chat session id"),
             )
         self.answers += 1
+        text = self.replies.pop(0) if self.replies else f"ответ {self.answers}"
         return httpx.Response(
             200,
-            content=sse(f"ответ {self.answers}", self.answers * 2, "думаю"),
+            content=sse(text, self.answers * 2, "думаю"),
             headers={"content-type": "text/event-stream"},
         )
 
@@ -396,13 +398,6 @@ class FailureTests(WebCase):
     def test_slot_is_released_after_failure(self):
         self.failing(httpx.Response(200, json={"code": 40003, "msg": "x"}))
         self.assertEqual(self.context.busy.count("DS_A"), 0)
-
-    def test_tools_are_rejected_until_stage_5(self):
-        with self.assertRaises(GatewayError) as ctx:
-            self.ask(
-                [user("1")], tools=[{"type": "function", "function": {"name": "f"}}]
-            )
-        self.assertEqual(ctx.exception.attempts[-1].failure, Failure.FATAL)
 
 
 class StreamTests(WebCase):
