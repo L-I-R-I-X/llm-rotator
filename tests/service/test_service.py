@@ -139,7 +139,7 @@ class CompletionTests(ServiceCase):
         self.assertEqual(body["choices"][0]["message"]["reasoning_content"], "думаю")
         self.assertEqual(body["choices"][0]["finish_reason"], "stop")
         self.assertGreater(body["usage"]["total_tokens"], 0)
-        self.assertIn("DS_A", r.headers["x-rotator-origin"])
+        self.assertEqual(r.headers["x-rotator-origin"], "m | dsw | DS_A | direct")
         self.assertEqual(r.headers["x-rotator-attempts"], "0")
 
     def test_two_clients_with_identical_messages_get_different_chats(self):

@@ -118,7 +118,9 @@ def gateway_error_response(error: GatewayError, service: Service) -> Response:
 
 
 def _headers(response: ChatResponse | StreamBase) -> dict[str, str]:
-    origin = response.origin.line().encode("ascii", "replace").decode()
+    origin = (
+        response.origin.line().replace(" · ", " | ").encode("ascii", "replace").decode()
+    )
     headers = {
         "X-Rotator-Origin": origin,
         "X-Rotator-Attempts": str(

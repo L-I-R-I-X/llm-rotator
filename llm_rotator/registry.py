@@ -1292,7 +1292,7 @@ def load_registry(base_dir: Path | None = None) -> Registry:
     `base_dir` — каталог, в котором лежат `models/` и `.env`. Без него берётся
     текущая рабочая директория (``ROOT``).
     """
-    base = ROOT if base_dir is None else base_dir
+    base = ROOT if base_dir is None else Path(base_dir)
     proxies = load_proxies(base / PROXIES_FILE)
     providers = load_providers(base / PROVIDERS_FILE)
     keys = load_keys(
