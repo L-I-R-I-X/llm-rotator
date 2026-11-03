@@ -301,7 +301,7 @@ context_window = 1000000
 Создаётся на (связка, httpx.Client через прокси связки). Методы:
 `create_chat()`, `complete(chat_id, parent_id, prompt, ref_file_ids, flags)
 -> Iterator[Event]`, `delete_chat(chat_id)`, `upload_file(name, bytes) ->
-file_id`, `ping()` (дешёвая проверка токена: `fetch_page?count=1`).
+file_id`, `ping()` (дешёвая проверка токена: `fetch_page?count=2` — `count=1` сервер отвергает («illegal count»)).
 
 Каждый ответ проверяется на ошибки **в теле** (`code`, `data.biz_code`)
 независимо от HTTP-кода; ошибка → исключение `WebError(kind, detail,

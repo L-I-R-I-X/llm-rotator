@@ -251,7 +251,7 @@ class DeepSeekClient:
 
     def ping(self) -> bool:
         """Дешёвая проверка токена; при мёртвом токене — `WebError("auth")`."""
-        self._call("GET", "/api/v0/chat_session/fetch_page?count=1")
+        self._call("GET", "/api/v0/chat_session/fetch_page?count=2")
         return True
 
     def complete(
