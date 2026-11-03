@@ -737,6 +737,14 @@ class StreamTests(RunnerCase):
         self.assertEqual(response.usage.total_tokens, 10)
         self.assertEqual(response.finish_reason, "stop")
         self.assertEqual(response.origin.line(), "m · p · K1 · p1")
+        # TTFT — от старта до первого непустого куска текста, не до конца.
+        self.assertGreater(response.first_token, 0.0)
+        self.assertLess(response.first_token, response.latency)
+
+    def test_first_token_is_zero_for_non_streaming_call(self):
+        _, _, runner = self.make([httpx.Response(200, json=completion("ок"))])
+        response = runner.complete("m", [{"role": "user", "content": "x"}])
+        self.assertEqual(response.first_token, 0.0)
 
     def test_deltas_arrive_in_order(self):
         body = sse(

@@ -186,6 +186,9 @@ class ChatResponse:
     finish_reason: str = ""
     usage: Usage = Usage()
     latency: float = 0.0
+    first_token: float = 0.0
+    """Время от старта до первого непустого куска текста. Ноль — потока не
+    было (нестриминговый вызов) или текст так и не пришёл."""
     reasoning: str = ""
     """Ход рассуждения, если провайдер его присылает (нестандартное поле у
     Groq и части локальных серверов). В тело следующего запроса не идёт."""
@@ -315,6 +318,7 @@ class LiveStream:
         self._tools = _ToolCallBuilder()
         self._finish_reason = ""
         self._usage: Usage | None = None
+        self._first_token = 0.0
         self._closed = False
 
     @property
@@ -356,6 +360,8 @@ class LiveStream:
             self._finish_reason = choice.finish_reason
         text = getattr(delta, "content", None) or ""
         if text:
+            if not self._first_token:
+                self._first_token = time.monotonic() - self._started
             self._text.append(text)
         return StreamChunk(
             delta=text,
@@ -372,6 +378,7 @@ class LiveStream:
             finish_reason=self._finish_reason,
             usage=self._usage or Usage(),
             latency=time.monotonic() - self._started,
+            first_token=self._first_token,
             attempts=self.attempts,
         )
 
