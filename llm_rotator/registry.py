@@ -906,8 +906,13 @@ def load_keys(
     proxies: dict[str, Proxy] | None = None,
     providers: dict[str, Provider] | None = None,
     base_dir: Path | None = None,
+    check_key_files: bool = True,
 ) -> dict[str, Key]:
-    """`base_dir` — от него считается `key_file` (по умолчанию текущий каталог)."""
+    """`base_dir` — от него считается `key_file` (по умолчанию текущий каталог).
+
+    `check_key_files=False` нужен команде `auth`: файла сессии у нового
+    аккаунта ещё нет, его как раз и создают.
+    """
     path = resolve(path)
     base = resolve(Path("."), base_dir)
     if proxies is None:
@@ -948,7 +953,7 @@ def load_keys(
             file_path = Path(raw_file).expanduser()
             if not file_path.is_absolute():
                 file_path = base / file_path
-            if not file_path.is_file():
+            if check_key_files and not file_path.is_file():
                 raise ConfigError(
                     f"{where}: key_file {raw_file!r} не найден ({file_path}). "
                     "Войди в аккаунт командой auth или положи файл сессии"
@@ -1286,7 +1291,9 @@ def _validate_credentials(registry: Registry) -> list[str]:
     return warnings
 
 
-def load_registry(base_dir: Path | None = None) -> Registry:
+def load_registry(
+    base_dir: Path | None = None, check_key_files: bool = True
+) -> Registry:
     """Загрузить и провалидировать все файлы конфигурации вместе с .env.
 
     `base_dir` — каталог, в котором лежат `models/` и `.env`. Без него берётся
@@ -1296,7 +1303,11 @@ def load_registry(base_dir: Path | None = None) -> Registry:
     proxies = load_proxies(base / PROXIES_FILE)
     providers = load_providers(base / PROVIDERS_FILE)
     keys = load_keys(
-        base / KEYS_FILE, proxies=proxies, providers=providers, base_dir=base
+        base / KEYS_FILE,
+        proxies=proxies,
+        providers=providers,
+        base_dir=base,
+        check_key_files=check_key_files,
     )
     models = load_models(base / MODELS_FILE, providers=providers)
     _validate_web_models(models, providers)

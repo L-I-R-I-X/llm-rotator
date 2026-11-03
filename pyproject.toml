@@ -33,6 +33,8 @@ dev = ["ruff>=0.6"]
 # Веб-чаты: PoW DeepSeek считается в WASM.
 web = ["wasmtime>=25"]
 # Режим сервиса: llm-rotator serve.
+# Вход в аккаунты (llm-rotator auth): CDP к Chrome.
+auth = ["websockets>=13"]
 server = ["starlette>=0.40", "uvicorn>=0.30"]
 
 [project.scripts]
