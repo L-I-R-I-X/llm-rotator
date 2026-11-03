@@ -35,6 +35,8 @@ class TransportContext:
     http_factory: HttpFactory = default_http
     pow_solver: Callable | None = None
     """Подмена решателя PoW (тесты); `None` — настоящий, через wasmtime."""
+    wake: Callable[[], None] = lambda: None
+    """Разбудить уборщика: появились брошенные чаты. Ставит `ModelRunner`."""
     _clients: dict[str, httpx.Client] = field(default_factory=dict, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 

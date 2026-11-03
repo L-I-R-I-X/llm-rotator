@@ -285,13 +285,15 @@ class DeepSeekWebTransport:
             yield from events
             if not outcome.text:
                 raise WebError("empty", "ответ без текста")
-            self._commit(route, plan, record, prompt, outcome)
+            self._commit(route, plan, record, prompt, outcome, settings)
             committed = True
             context.store.mark_account(key, "ok")
         finally:
             if record is not None and not committed:
                 context.store.set_state(route.provider.name, record.chat_id, ABANDONED)
             context.busy.release(key)
+            if record is not None:
+                context.wake()  # брошенное (или after_turn) — пусть уберут
 
     def _commit(
         self,
@@ -300,6 +302,7 @@ class DeepSeekWebTransport:
         record: ChatRecord,
         prompt: str,
         outcome: _Outcome,
+        settings: WebSettings,
     ) -> None:
         text = "".join(outcome.text)
         fp = plan.fingerprint
@@ -313,7 +316,9 @@ class DeepSeekWebTransport:
             sent,
             outcome.message_id,
             added,
-            ABANDONED if plan.ephemeral else ACTIVE,
+            ABANDONED
+            if plan.ephemeral or settings.delete_policy == "after_turn"
+            else ACTIVE,
         )
         if not plan.ephemeral:
             hint_ns, hint_session = record.namespace, record.session

@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS chats (
     last_used_at REAL NOT NULL,
     state TEXT NOT NULL,
     delete_attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (provider, chat_id)
 );
 CREATE INDEX IF NOT EXISTS chats_lookup
@@ -76,12 +77,13 @@ class ChatRecord:
     last_used_at: float
     state: str
     delete_attempts: int
+    next_attempt_at: float = 0.0
 
 
 _COLUMNS = (
     "provider, chat_id, key_name, proxy_name, namespace, session, context_key, "
     "sent_keys, parent_message_id, turns, remote_chars, created_at, last_used_at, "
-    "state, delete_attempts"
+    "state, delete_attempts, next_attempt_at"
 )
 
 
@@ -102,6 +104,7 @@ def _record(row: Sequence) -> ChatRecord:
         last_used_at=row[12],
         state=row[13],
         delete_attempts=row[14],
+        next_attempt_at=row[15],
     )
 
 
@@ -149,7 +152,7 @@ class ConversationStore:
     ) -> ChatRecord:
         now = self._clock()
         self._run(
-            f"INSERT INTO chats ({_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT INTO chats ({_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 provider,
                 chat_id,
@@ -166,6 +169,7 @@ class ConversationStore:
                 now,
                 state,
                 0,
+                0.0,
             ),
         )
         record = self.get(provider, chat_id)
@@ -266,6 +270,51 @@ class ConversationStore:
             args.append(provider)
         return [_record(r) for r in self._all(sql + " ORDER BY created_at", args)]
 
+    # --- уборка -------------------------------------------------------------
+
+    def due_for_deletion(
+        self, now: float, idle_ttl: dict[str, float]
+    ) -> list[ChatRecord]:
+        """Чаты, которые пора удалить: брошенные и давно простаивающие.
+
+        `idle_ttl` — провайдер → секунд простоя; провайдеров без записи (и с
+        политикой `never`) здесь нет. Зависший в `busy` чат (процесс упал
+        посреди хода) считается простаивающим так же, как `active`.
+        """
+        due: list[ChatRecord] = []
+        for record in self.by_state(ABANDONED):
+            if record.provider in idle_ttl and record.next_attempt_at <= now:
+                due.append(record)
+        for state in (ACTIVE, BUSY):
+            for record in self.by_state(state):
+                ttl = idle_ttl.get(record.provider)
+                if ttl is not None and record.last_used_at < now - ttl:
+                    due.append(record)
+        return due
+
+    def mark_deleted(self, provider: str, chat_id: str) -> None:
+        self.set_state(provider, chat_id, DELETED)
+
+    def record_delete_failure(
+        self, provider: str, chat_id: str, next_attempt_at: float, final: bool
+    ) -> None:
+        """Неудачное удаление: попытка +1, повтор позже, после лимита — отказ.
+
+        Чат при этом считается брошенным: простаивающий `active` больше не
+        должен продолжаться, раз его пытаются удалить.
+        """
+        self._run(
+            "UPDATE chats SET delete_attempts=delete_attempts+1, "
+            "next_attempt_at=?, state=? WHERE provider=? AND chat_id=?",
+            (next_attempt_at, DELETE_FAILED if final else ABANDONED, provider, chat_id),
+        )
+
+    def purge_deleted(self, older_than: float) -> int:
+        cursor = self._run(
+            "DELETE FROM chats WHERE state=? AND last_used_at<?", (DELETED, older_than)
+        )
+        return cursor.rowcount
+
     # --- файлы --------------------------------------------------------------
 
     def cached_file(self, key_name: str, sha256: str) -> str | None:
@@ -292,5 +341,11 @@ class ConversationStore:
         )
 
     def account_health(self, key_name: str) -> str:
-        rows = self._all("SELECT health FROM accounts WHERE key_name=?", (key_name,))
-        return rows[0][0] if rows else "ok"
+        return self.account_state(key_name)[0]
+
+    def account_state(self, key_name: str) -> tuple[str, float]:
+        """(здоровье, когда отмечено). Нет записи — (`ok`, 0)."""
+        rows = self._all(
+            "SELECT health, updated_at FROM accounts WHERE key_name=?", (key_name,)
+        )
+        return (rows[0][0], rows[0][1]) if rows else ("ok", 0.0)

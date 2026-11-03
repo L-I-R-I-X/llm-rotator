@@ -117,6 +117,7 @@ class WebCase(unittest.TestCase):
         account.write_text(json.dumps({"token": "T", "wasmUrl": "u"}))
         self.site = FakeDeepSeek()
         self.store = ConversationStore()
+        self.addCleanup(self.store.close)
         self.context = TransportContext(
             self.store,
             http_factory=lambda proxy: httpx.Client(
@@ -147,7 +148,7 @@ class WebCase(unittest.TestCase):
             models={"m": Model(name="m", providers=("dsw",))},
             env_keys={},
         )
-        self.runner = ModelRunner(registry, context=self.context)
+        self.runner = ModelRunner(registry, context=self.context, janitor=False)
         self.addCleanup(self.runner.close)
 
     def ask(self, messages, namespace="default", session="", **params):
@@ -505,6 +506,7 @@ class PlannerTests(unittest.TestCase):
 
     def setUp(self):
         self.store = ConversationStore()
+        self.addCleanup(self.store.close)
         self.settings = WebSettings()
         self.messages = [SYSTEM, user("1"), assistant("a1"), user("2")]
         fp = fingerprint.fingerprint(self.messages[:2])
@@ -577,6 +579,7 @@ class BusyTrackerTests(unittest.TestCase):
 class StoreTests(unittest.TestCase):
     def test_claim_is_exclusive(self):
         store = ConversationStore()
+        self.addCleanup(store.close)
         store.create_chat("p", "c", "K", "direct", "ns", "", "ctx", ACTIVE)
         self.assertTrue(store.claim("p", "c"))
         self.assertFalse(store.claim("p", "c"))
@@ -588,7 +591,9 @@ class StoreTests(unittest.TestCase):
             store.create_chat("p", "c", "K", "direct", "ns", "", "ctx", ACTIVE)
             store.finish_turn("p", "c", ["a", "b"], 5, 3)
             store.close()
-            record = ConversationStore(path).get("p", "c")
+            reopened = ConversationStore(path)
+            record = reopened.get("p", "c")
+            reopened.close()
             self.assertEqual(record.sent_keys, ("a", "b"))
             self.assertEqual(record.parent_message_id, 5)
             self.assertEqual(record.turns, 1)

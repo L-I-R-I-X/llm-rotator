@@ -42,6 +42,7 @@ from .transport import (
 
 if TYPE_CHECKING:
     from .web.context import TransportContext
+    from .web.janitor import Janitor
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class ModelRunner:
         state: SessionState | None = None,
         transports: dict[str, Transport] | None = None,
         context: TransportContext | None = None,
+        janitor: bool = True,
     ) -> None:
         """
         `registry` и `state` — необязательные: без них берутся из конфигурации
@@ -69,7 +71,8 @@ class ModelRunner:
         `transports` подменяет транспорты по api_style — это точка расширения
         для тестов и несовместимых API. `context` — общее состояние веб-чатов
         (хранилище, пул клиентов); без него создаётся при первом обращении к
-        веб-провайдеру, в `state/` рядом с `models/`.
+        веб-провайдеру, в `state/` рядом с `models/`. `janitor=False` не
+        запускает фоновое удаление брошенных веб-чатов (отладка, тесты).
         """
         self.registry = registry if registry is not None else load_registry()
         self.gateway = (
@@ -77,6 +80,8 @@ class ModelRunner:
         )
         self._transports: dict[str, Transport] = dict(transports or {})
         self._context = context
+        self._janitor_enabled = janitor
+        self._janitor: Janitor | None = None
         self._closed = False
 
     def transport_for(self, provider: Provider) -> Transport:
@@ -98,6 +103,12 @@ class ModelRunner:
             from .web.context import TransportContext
 
             self._context = TransportContext.default(self.registry.base_dir)
+        if self._janitor is None and self._janitor_enabled:
+            from .web.janitor import Janitor
+
+            self._janitor = Janitor(self.registry, self._context)
+            self._context.wake = self._janitor.wake
+            self._janitor.start()
         return self._context
 
     def complete(
@@ -256,6 +267,8 @@ class ModelRunner:
         for transport in self._transports.values():
             transport.close()
         self._transports.clear()
+        if self._janitor is not None:
+            self._janitor.stop()
         if self._context is not None:
             self._context.close()
         self.gateway.close()
