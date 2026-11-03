@@ -240,6 +240,9 @@ class SessionState:
 
     cooldown_keys: dict[str, float] = field(default_factory=dict)
     unavailable: set[tuple[str, str]] = field(default_factory=set)
+    suspended: dict[str, float] = field(default_factory=dict)
+    """Провайдеры на временной паузе целиком: имя → когда пауза кончится."""
+    busy_seen: dict[str, dict[str, float]] = field(default_factory=dict)
     penalties: dict[Target, Penalty] = field(default_factory=dict)
     backoff_base: float = DEFAULT_BACKOFF_BASE
     backoff_max: float = DEFAULT_BACKOFF_MAX
@@ -339,7 +342,48 @@ class SessionState:
     # --- провайдер без модели ---------------------------------------------
 
     def provider_available(self, provider: str, model_name: str) -> bool:
-        return (provider, model_name) not in self.unavailable
+        return (
+            provider,
+            model_name,
+        ) not in self.unavailable and not self.suspended_now(provider)
+
+    def suspend_provider(self, provider: str, seconds: float) -> None:
+        """Не трогать провайдера `seconds` секунд: он перегружен у всех сразу.
+
+        Отдельно от `unavailable` («у провайдера нет этой модели»): пауза
+        кончается сама и не сбрасывается `forget_models`.
+        """
+        with self._lock:
+            self.suspended[provider] = self.clock() + seconds
+
+    def suspended_now(self, provider: str) -> bool:
+        until = self.suspended.get(provider)
+        if until is None:
+            return False
+        if self.clock() >= until:
+            self.suspended.pop(provider, None)
+            return False
+        return True
+
+    def note_busy(
+        self, provider: str, key_name: str, window: float = 60.0, pause: float = 60.0
+    ) -> bool:
+        """Запомнить «занято» от связки; две разные за `window` с — пауза провайдеру.
+
+        Вернуть True, если провайдер ушёл на паузу. Один аккаунт, которому не
+        повезло, провайдера не выключает.
+        """
+        with self._lock:
+            now = self.clock()
+            seen = self.busy_seen.setdefault(provider, {})
+            seen[key_name] = now
+            for name in [n for n, at in seen.items() if now - at > window]:
+                del seen[name]
+            if len(seen) < 2:
+                return False
+            seen.clear()
+            self.suspended[provider] = now + pause
+            return True
 
     def drop_provider(self, provider: str, model_name: str) -> None:
         self.unavailable.add((provider, model_name))
@@ -948,7 +992,14 @@ class Gateway:
         if seen:
             lines.append("  провайдеры: " + ", ".join(seen))
         for route in routes:
-            if not self.state.provider_available(route.provider.name, route.model.name):
+            if self.state.suspended_now(route.provider.name):
+                lines.append(
+                    f"  {route.provider.name}: на паузе (перегружен у всех "
+                    "аккаунтов), скоро попробуем снова"
+                )
+            elif not self.state.provider_available(
+                route.provider.name, route.model.name
+            ):
                 lines.append(
                     f"  {route.provider.name}: модели нет (помечен после 404), "
                     "за новым диалогом попробуем снова"

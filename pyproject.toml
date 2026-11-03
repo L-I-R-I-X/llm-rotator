@@ -30,6 +30,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff>=0.6"]
+# Веб-чаты: PoW DeepSeek считается в WASM.
+web = ["wasmtime>=25"]
 
 [project.scripts]
 llm-rotator-discover = "llm_rotator.discovery:main"
