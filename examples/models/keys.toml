@@ -26,3 +26,13 @@ proxies = ["direct"]
 key_name = "OLLAMA_LOCAL"
 provider = "ollama"
 proxies = ["direct"]
+
+# Веб-аккаунт: key_file — путь от каталога проекта (значение из .env не читается).
+# max_concurrent — параллельных ходов на связку (для веб-аккаунта по умолчанию 1).
+# Пока прокси за аккаунтом не закреплён, оставь "direct"; назначишь позже.
+[[keys]]
+key_name = "DS_EXAMPLE"
+provider = "deepseek_web"
+key_file = "accounts/ds_example.json"
+proxies = ["direct"]
+max_concurrent = 1

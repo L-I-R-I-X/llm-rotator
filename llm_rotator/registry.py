@@ -92,13 +92,28 @@ BACKOFF_MAX_VAR = "LLM_BACKOFF_MAX"
 DEFAULT_API_STYLE = "openai"
 DEFAULT_AUTH = "bearer"
 
-AUTH_STYLES: tuple[str, ...] = ("bearer", "none")
+AUTH_STYLES: tuple[str, ...] = ("bearer", "none", "web_session")
 """Как провайдер принимает авторизацию.
 
 `bearer` — обычный `Authorization: Bearer <ключ>`, ключ обязан быть в .env.
 `none`   — авторизации нет вовсе (локальный ollama, свой сервер): значение
            ключа не читается, а запись в keys.toml нужна только ради адресов.
+`web_session` — веб-чат под аккаунтом: вместо ключа файл сессии (`key_file` в
+           keys.toml), читает его транспорт; значение из .env не используется.
 """
+
+WEB_API_STYLES: tuple[str, ...] = ("deepseek_web",)
+"""Веб-семейство api_style: провайдеры без публичного API, только аккаунты.
+
+У таких провайдеров `auth` обязан быть `web_session`, а каждая модель, которая
+на них ссылается, описана в `[providers.X.web.models]`.
+"""
+
+DELETE_POLICIES: tuple[str, ...] = ("abandoned", "after_turn", "never")
+"""Когда удалять удалённые чаты, созданные ротатором (только свои, из реестра)."""
+
+DEFAULT_WEB_MAX_CONCURRENT = 1
+"""Параллельных ходов на веб-связку по умолчанию. У API-ключей лимита нет."""
 
 DEFAULT_PROXY_TYPE = "http"
 PROXY_TYPES: tuple[str, ...] = ("http", "https", "socks5", "socks5h")
@@ -172,11 +187,52 @@ class Proxy:
 
 @dataclass(frozen=True, slots=True)
 class Key:
-    """Ключ API: имя переменной в .env, провайдер и разрешённые адреса."""
+    """Ключ API: имя переменной в .env, провайдер и разрешённые адреса.
+
+    У веб-аккаунта (`auth = "web_session"`) вместо значения из .env — файл
+    сессии `key_file` (абсолютный путь, разрешён на загрузке).
+    """
 
     name: str
     provider: str
     proxies: tuple[str, ...]
+    key_file: str = ""
+    max_concurrent: int | None = None
+    """Параллельных ходов на связку; `None` — без ограничения."""
+
+
+@dataclass(frozen=True, slots=True)
+class WebModel:
+    """Флаги запроса к веб-чату для одной модели из models.toml."""
+
+    thinking: bool = False
+    search: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class WebSettings:
+    """Настройки веб-провайдера: `[providers.X.web]` в providers.toml."""
+
+    inline_max_chars: int = 200_000
+    """Больше — контекст уходит файлом."""
+    file_max_chars: int = 4_000_000
+    """Больше — Failure.TOO_LARGE."""
+    first_event_timeout: float = 15.0
+    """Секунд до первого SSE-события."""
+    idle_timeout: float = 60.0
+    """Секунд тишины в середине генерации."""
+    chat_max_turns: int = 100
+    chat_max_chars: int = 600_000
+    chat_idle_ttl: float = 7200.0
+    """Брошенный по простою чат удаляется через столько секунд."""
+    delete_policy: str = "abandoned"
+    models: tuple[tuple[str, WebModel], ...] = ()
+
+    def model(self, name: str) -> WebModel | None:
+        for model_name, flags in self.models:
+            if model_name == name:
+                return flags
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,11 +246,18 @@ class Provider:
     model_id_prefix: str = ""
     auth: str = DEFAULT_AUTH
     extra_headers: tuple[tuple[str, str], ...] = ()
+    web: WebSettings | None = None
+    """Есть только у провайдеров веб-семейства (`WEB_API_STYLES`)."""
 
     @property
     def requires_key(self) -> bool:
         """Нужно ли значение ключа в .env для этого провайдера."""
-        return self.auth != "none"
+        return self.auth == "bearer"
+
+    @property
+    def uses_key_file(self) -> bool:
+        """Вместо ключа из .env — файл сессии аккаунта (`key_file`)."""
+        return self.auth == "web_session"
 
     @property
     def headers(self) -> dict[str, str]:
@@ -268,7 +331,9 @@ class Binding:
 
     key_name: str
     key_value: str
+    """Значение ключа; для веб-связки — путь к файлу сессии."""
     proxy: Proxy
+    max_concurrent: int | None = None
 
     def __str__(self) -> str:
         return f"{self.key_name}@{self.proxy.name}"
@@ -428,8 +493,12 @@ class Registry:
         """
         bindings: list[Binding] = []
         for key in self.keys_for(provider_name):
-            value = self.env_keys.get(key.name) or ""
-            if not value and self.provider(key.provider).requires_key:
+            provider = self.provider(key.provider)
+            if provider.uses_key_file:
+                value = key.key_file
+            else:
+                value = self.env_keys.get(key.name) or ""
+            if not value and provider.requires_key:
                 continue
             for proxy_name in key.proxies:
                 bindings.append(
@@ -437,9 +506,16 @@ class Registry:
                         key_name=key.name,
                         key_value=value,
                         proxy=self.proxy(proxy_name),
+                        max_concurrent=self._max_concurrent(key, provider),
                     )
                 )
         return tuple(bindings)
+
+    @staticmethod
+    def _max_concurrent(key: Key, provider: Provider) -> int | None:
+        if key.max_concurrent is not None:
+            return key.max_concurrent
+        return DEFAULT_WEB_MAX_CONCURRENT if provider.uses_key_file else None
 
     def credential_problem(self, provider_name: str) -> str:
         """Почему у провайдера нет ни одной связки."""
@@ -569,6 +645,13 @@ def _opt_int_or_none(table: dict, field: str, where: str) -> int | None:
     return value
 
 
+def _opt_seconds(table: dict, field: str, where: str, default: float) -> float:
+    value = table.get(field, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ConfigError(f"{where}: поле {field!r} должно быть положительным числом")
+    return float(value)
+
+
 def _name_list(table: dict, field: str, where: str) -> tuple[str, ...]:
     value = table.get(field)
     if not isinstance(value, list) or not value:
@@ -678,6 +761,79 @@ def load_proxies(path: Path = PROXIES_FILE) -> dict[str, Proxy]:
     return out
 
 
+_WEB_FIELDS = frozenset(
+    {
+        "inline_max_chars",
+        "file_max_chars",
+        "first_event_timeout",
+        "idle_timeout",
+        "chat_max_turns",
+        "chat_max_chars",
+        "chat_idle_ttl",
+        "delete_policy",
+        "models",
+    }
+)
+_WEB_MODEL_FIELDS = frozenset({"thinking", "search"})
+
+
+def _load_web(table: dict, where: str) -> WebSettings:
+    """Разобрать `[providers.X.web]`; неизвестные поля — ошибка."""
+    where = f"{where}.web"
+    unknown = sorted(set(table) - _WEB_FIELDS)
+    if unknown:
+        raise ConfigError(
+            f"{where}: неизвестные поля {_fmt_names(unknown)}. "
+            f"Допустимо: {_fmt_names(sorted(_WEB_FIELDS))}"
+        )
+    d = WebSettings()
+    policy = _opt_str(table, "delete_policy", where, d.delete_policy)
+    if policy not in DELETE_POLICIES:
+        raise ConfigError(
+            f"{where}: поле 'delete_policy' = {policy!r} не поддерживается. "
+            f"Допустимо: {_fmt_names(DELETE_POLICIES)}"
+        )
+    raw_models = table.get("models", {})
+    if not isinstance(raw_models, dict):
+        raise ConfigError(
+            f"{where}: секция 'models' должна быть таблицей вида "
+            '"модель" = { thinking = false, search = false }'
+        )
+    models: list[tuple[str, WebModel]] = []
+    for name, flags in raw_models.items():
+        mwhere = f"{where}.models[{name!r}]"
+        if not isinstance(flags, dict):
+            raise ConfigError(f"{mwhere}: ожидается таблица с флагами thinking/search")
+        bad = sorted(set(flags) - _WEB_MODEL_FIELDS)
+        if bad:
+            raise ConfigError(
+                f"{mwhere}: неизвестные поля {_fmt_names(bad)}. "
+                f"Допустимо: {_fmt_names(sorted(_WEB_MODEL_FIELDS))}"
+            )
+        models.append(
+            (
+                name,
+                WebModel(
+                    thinking=_opt_bool(flags, "thinking", mwhere, False),
+                    search=_opt_bool(flags, "search", mwhere, False),
+                ),
+            )
+        )
+    return WebSettings(
+        inline_max_chars=_opt_int(table, "inline_max_chars", where, d.inline_max_chars),
+        file_max_chars=_opt_int(table, "file_max_chars", where, d.file_max_chars),
+        first_event_timeout=_opt_seconds(
+            table, "first_event_timeout", where, d.first_event_timeout
+        ),
+        idle_timeout=_opt_seconds(table, "idle_timeout", where, d.idle_timeout),
+        chat_max_turns=_opt_int(table, "chat_max_turns", where, d.chat_max_turns),
+        chat_max_chars=_opt_int(table, "chat_max_chars", where, d.chat_max_chars),
+        chat_idle_ttl=_opt_seconds(table, "chat_idle_ttl", where, d.chat_idle_ttl),
+        delete_policy=policy,
+        models=tuple(models),
+    )
+
+
 def load_providers(path: Path = PROVIDERS_FILE) -> dict[str, Provider]:
     path = resolve(path)
     doc = _load_toml(path)
@@ -698,14 +854,40 @@ def load_providers(path: Path = PROVIDERS_FILE) -> dict[str, Provider]:
                 f"{where}: поле 'auth' = {auth!r} не поддерживается. "
                 f"Допустимо: {_fmt_names(AUTH_STYLES)}"
             )
+        is_web = api_style in WEB_API_STYLES
+        if is_web and auth != "web_session":
+            raise ConfigError(
+                f"{where}: api_style {api_style!r} — веб-чат, для него нужен "
+                'auth = "web_session"'
+            )
+        if auth == "web_session" and not is_web:
+            raise ConfigError(
+                f'{where}: auth = "web_session" допустим только для веб-стилей: '
+                f"{_fmt_names(WEB_API_STYLES)}"
+            )
+        if auth == "web_session":
+            # У веб-чата списка моделей нет: пустой адрес допустим и означает
+            # «discovery пропускает».
+            models_url = _opt_str(table, "models_url", where)
+        else:
+            models_url = _req_str(table, "models_url", where)
+        web_table = table.get("web")
+        if web_table is not None and not is_web:
+            raise ConfigError(
+                f"{where}: секция 'web' бывает только у веб-провайдеров "
+                f"({_fmt_names(WEB_API_STYLES)})"
+            )
+        if web_table is not None and not isinstance(web_table, dict):
+            raise ConfigError(f"{where}: секция 'web' должна быть таблицей")
         out[name] = Provider(
             name=name,
             api_style=api_style,
             base_url=_req_str(table, "base_url", where),
-            models_url=_req_str(table, "models_url", where),
+            models_url=models_url,
             model_id_prefix=_opt_str(table, "model_id_prefix", where),
             auth=auth,
             extra_headers=_extra_headers(table, where),
+            web=_load_web(web_table or {}, where) if is_web else None,
         )
     if not out:
         raise ConfigError(f"{path.name}: не описан ни один провайдер")
@@ -716,8 +898,11 @@ def load_keys(
     path: Path = KEYS_FILE,
     proxies: dict[str, Proxy] | None = None,
     providers: dict[str, Provider] | None = None,
+    base_dir: Path | None = None,
 ) -> dict[str, Key]:
+    """`base_dir` — от него считается `key_file` (по умолчанию текущий каталог)."""
     path = resolve(path)
+    base = resolve(Path("."), base_dir)
     if proxies is None:
         proxies = load_proxies()
     if providers is None:
@@ -749,7 +934,31 @@ def load_keys(
                     f"{where}: прокси {pname!r} не найден в proxies.toml. "
                     f"Доступные: {_fmt_names(proxies)}"
                 )
-        out[name] = Key(name=name, provider=provider, proxies=proxy_names)
+        prov = providers[provider]
+        key_file = ""
+        if prov.uses_key_file:
+            raw_file = _req_str(table, "key_file", where)
+            file_path = Path(raw_file).expanduser()
+            if not file_path.is_absolute():
+                file_path = base / file_path
+            if not file_path.is_file():
+                raise ConfigError(
+                    f"{where}: key_file {raw_file!r} не найден ({file_path}). "
+                    "Войди в аккаунт командой auth или положи файл сессии"
+                )
+            key_file = str(file_path)
+        elif "key_file" in table:
+            raise ConfigError(
+                f"{where}: key_file допустим только у провайдеров с "
+                f'auth = "web_session", а {provider!r} — {prov.auth!r}'
+            )
+        out[name] = Key(
+            name=name,
+            provider=provider,
+            proxies=proxy_names,
+            key_file=key_file,
+            max_concurrent=_opt_int_or_none(table, "max_concurrent", where),
+        )
     return out
 
 
@@ -931,12 +1140,72 @@ def load_env_keys(path: Path = ENV_FILE) -> dict[str, str]:
     return {name: value.strip() for name, value in values.items() if value}
 
 
-def _shared_proxy_warnings(
-    keys: dict[str, Key], proxies: dict[str, Proxy]
+def _validate_web_models(
+    models: dict[str, Model], providers: dict[str, Provider]
+) -> None:
+    """Каждая модель веб-провайдера обязана быть описана в его `web.models`."""
+    for model in models.values():
+        for pname in model.providers:
+            web = providers[pname].web
+            if web is not None and web.model(model.name) is None:
+                raise ConfigError(
+                    f"models.toml [{model.name}]: провайдер {pname!r} — веб-чат, "
+                    f"а модель не описана в [providers.{pname}.web.models] "
+                    "(нужны флаги thinking/search)"
+                )
+
+
+def _shared_web_account_warnings(
+    keys: dict[str, Key],
+    proxies: dict[str, Proxy],
+    providers: dict[str, Provider],
 ) -> list[str]:
-    """Адрес, забитый под несколько ключей, — риск абуза на бесплатных лимитах."""
+    """Несколько аккаунтов одного веб-провайдера на одном адресе.
+
+    Для `direct` — одна сводная строка на провайдера: пока прокси за
+    аккаунтами не закреплены, это ожидаемо, а не ошибка.
+    """
+    groups: dict[tuple[str, str], list[str]] = {}
+    for key in keys.values():
+        if not providers[key.provider].uses_key_file:
+            continue
+        for pname in key.proxies:
+            groups.setdefault((key.provider, pname), []).append(key.name)
+
+    warnings: list[str] = []
+    for (provider, pname), holders in sorted(groups.items()):
+        proxy = proxies[pname]
+        if len(holders) < 2 or proxy.rotates:
+            continue
+        detail = ", ".join(sorted(holders))
+        if proxy.is_direct:
+            warnings.append(
+                f"веб-аккаунты {provider!r} без прокси ({detail}) идут с одного "
+                "прямого IP: назначь каждому свой адрес в keys.toml"
+            )
+        else:
+            warnings.append(
+                f"веб-аккаунты {provider!r} ({detail}) сидят на одном прокси "
+                f"{pname!r}: это два аккаунта с одного IP — разведи их по "
+                "адресам либо поставь rotates = true"
+            )
+    return warnings
+
+
+def _shared_proxy_warnings(
+    keys: dict[str, Key],
+    proxies: dict[str, Proxy],
+    providers: dict[str, Provider] | None = None,
+) -> list[str]:
+    """Адрес, забитый под несколько ключей, — риск абуза на бесплатных лимитах.
+
+    Веб-аккаунты сюда не входят: для них свои предупреждения
+    (`_shared_web_account_warnings`).
+    """
     by_proxy: dict[str, list[str]] = {}
     for key in keys.values():
+        if providers is not None and providers[key.provider].uses_key_file:
+            continue
         for pname in key.proxies:
             by_proxy.setdefault(pname, []).append(key.name)
 
@@ -1019,8 +1288,11 @@ def load_registry(base_dir: Path | None = None) -> Registry:
     base = ROOT if base_dir is None else base_dir
     proxies = load_proxies(base / PROXIES_FILE)
     providers = load_providers(base / PROVIDERS_FILE)
-    keys = load_keys(base / KEYS_FILE, proxies=proxies, providers=providers)
+    keys = load_keys(
+        base / KEYS_FILE, proxies=proxies, providers=providers, base_dir=base
+    )
     models = load_models(base / MODELS_FILE, providers=providers)
+    _validate_web_models(models, providers)
     chains = load_chains(base / CHAINS_FILE, models=models)
     env_keys = load_env_keys(base / ENV_FILE)
     roles = load_roles(env_keys, chains)
@@ -1041,7 +1313,8 @@ def load_registry(base_dir: Path | None = None) -> Registry:
         backoff_max=backoff_max,
     )
     warnings = _validate_credentials(registry)
-    warnings += _shared_proxy_warnings(keys, proxies)
+    warnings += _shared_proxy_warnings(keys, proxies, providers)
+    warnings += _shared_web_account_warnings(keys, proxies, providers)
     warnings += _unused_proxy_warnings(keys, proxies)
     warnings += _chain_warnings(registry)
     registry.warnings = warnings

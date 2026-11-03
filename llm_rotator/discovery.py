@@ -108,7 +108,8 @@ def poll_provider(gateway: Gateway, provider: str) -> Discovered:
 
 def poll_all(gateway: Gateway, registry: Registry) -> dict[str, Discovered]:
     """Опросить всех провайдеров параллельно."""
-    names = list(registry.providers)
+    # У веб-чатов списка моделей нет (models_url пуст) — опрашивать нечего.
+    names = [n for n, p in registry.providers.items() if p.models_url]
     if not names:
         return {}
     results: dict[str, Discovered] = {}

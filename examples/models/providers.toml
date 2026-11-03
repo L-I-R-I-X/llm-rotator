@@ -36,3 +36,29 @@ api_style = "openai"
 base_url = "http://127.0.0.1:11434/v1"
 models_url = "http://127.0.0.1:11434/v1/models"
 auth = "none"
+
+# Веб-чат под аккаунтом (не API): auth = "web_session", вместо ключа из .env —
+# файл сессии (key_file в keys.toml). Списка моделей у него нет, models_url пуст.
+# Секция web необязательна, ниже — значения по умолчанию.
+[providers.deepseek_web]
+provider_name = "deepseek_web"
+api_style = "deepseek_web"
+base_url = "https://chat.deepseek.com"
+models_url = ""
+auth = "web_session"
+
+[providers.deepseek_web.web]
+inline_max_chars = 200000     # больше — контекст уходит файлом
+file_max_chars = 4000000      # больше — отказ как «слишком большой»
+first_event_timeout = 15      # сек до первого SSE-события
+idle_timeout = 60             # сек тишины в середине генерации
+chat_max_turns = 100          # потом новый удалённый чат
+chat_max_chars = 600000       # суммарно в удалённом чате, потом новый
+chat_idle_ttl = 7200          # сек: брошенный по простою чат удаляется
+delete_policy = "abandoned"   # "abandoned" | "after_turn" | "never"
+
+# Каждая модель из models.toml, ссылающаяся на этого провайдера, описана здесь.
+[providers.deepseek_web.web.models]
+"deepseek-web"       = { thinking = false, search = false }
+"deepseek-web-think" = { thinking = true,  search = false }
+"deepseek-web-search" = { thinking = false, search = true }

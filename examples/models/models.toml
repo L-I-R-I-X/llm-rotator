@@ -24,3 +24,14 @@ model_name = "qwen2.5:7b"
 providers = ["ollama"]
 context_window = 32768
 prompt_profile = "core"
+
+# Веб-модели: флаги thinking/search заданы в providers.toml, [providers.*.web.models].
+[[models]]
+model_name = "deepseek-web"
+providers = ["deepseek_web"]
+context_window = 1000000
+
+[[models]]
+model_name = "deepseek-web-think"
+providers = ["deepseek_web"]
+context_window = 1000000

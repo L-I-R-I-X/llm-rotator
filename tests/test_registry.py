@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 import time
@@ -457,7 +458,9 @@ class ModelListTests(unittest.TestCase):
         self.assertEqual(gw.calls, ["K1@p1", "K1@p2"])
 
 
-class ValidationTests(unittest.TestCase):
+class ConfigDirCase(unittest.TestCase):
+    """Каталог с минимальной валидной конфигурацией и помощниками записи."""
+
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
         (self.dir / "models").mkdir()
@@ -506,6 +509,8 @@ providers = ["p"]
     def load(self) -> Registry:
         return load_registry(self.dir)
 
+
+class ValidationTests(ConfigDirCase):
     def test_valid_config_loads(self):
         reg = self.load()
         self.assertEqual(len(reg.models), 1)
@@ -1083,3 +1088,210 @@ class CacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class WebProviderConfigTests(ConfigDirCase):
+    """Веб-провайдер (auth = "web_session"): аккаунты вместо ключей из .env."""
+
+    PROVIDER = """
+[providers.dsw]
+provider_name = "dsw"
+api_style = "deepseek_web"
+base_url = "https://chat.example"
+models_url = ""
+auth = "web_session"
+
+[providers.dsw.web]
+first_event_timeout = 10
+chat_max_turns = 50
+
+[providers.dsw.web.models]
+"dsw-chat" = { thinking = false, search = false }
+"dsw-think" = { thinking = true }
+"""
+
+    def setUp(self):
+        super().setUp()
+        (self.dir / "accounts").mkdir()
+        (self.dir / "accounts" / "a.json").write_text("{}", encoding="utf-8")
+        (self.dir / "accounts" / "b.json").write_text("{}", encoding="utf-8")
+        self.write("providers.toml", self.read("providers.toml") + self.PROVIDER)
+        self.write_keys(self.account("DS_A", "a.json"))
+        self.write(
+            "models.toml",
+            '[[models]]\nmodel_name = "m"\nproviders = ["p"]\n'
+            '[[models]]\nmodel_name = "dsw-chat"\nproviders = ["dsw"]\n',
+        )
+
+    def read(self, name: str) -> str:
+        return (self.dir / "models" / name).read_text(encoding="utf-8")
+
+    def account(self, name: str, file: str | None, extra: str = "") -> str:
+        line = f'key_file = "accounts/{file}"\n' if file else ""
+        return (
+            f'[[keys]]\nkey_name = "{name}"\nprovider = "dsw"\n'
+            f'proxies = ["direct"]\n{line}{extra}\n'
+        )
+
+    def write_keys(self, *accounts: str) -> None:
+        base = '[[keys]]\nkey_name = "K1"\nprovider = "p"\nproxies = ["direct"]\n\n'
+        self.write("keys.toml", base + "".join(accounts))
+
+    def test_loads_web_provider_without_env_key(self):
+        reg = self.load()
+        dsw = reg.provider("dsw")
+        self.assertEqual(dsw.auth, "web_session")
+        self.assertFalse(dsw.requires_key)
+        self.assertEqual(dsw.web.first_event_timeout, 10.0)
+        self.assertEqual(dsw.web.chat_max_turns, 50)
+        self.assertEqual(dsw.web.inline_max_chars, 200_000)
+        self.assertTrue(dsw.web.model("dsw-think").thinking)
+        self.assertFalse(dsw.web.model("dsw-chat").thinking)
+
+    def test_binding_value_is_the_key_file_path_and_default_concurrency(self):
+        binding = self.load().route("dsw-chat", "dsw").bindings[0]
+        self.assertEqual(binding.key_name, "DS_A")
+        self.assertEqual(binding.key_value, str(self.dir / "accounts" / "a.json"))
+        self.assertEqual(binding.max_concurrent, 1)
+
+    def test_api_key_binding_has_no_concurrency_limit(self):
+        self.assertIsNone(self.load().route("m", "p").bindings[0].max_concurrent)
+
+    def test_max_concurrent_is_read(self):
+        self.write_keys(self.account("DS_A", "a.json", "max_concurrent = 3\n"))
+        binding = self.load().route("dsw-chat", "dsw").bindings[0]
+        self.assertEqual(binding.max_concurrent, 3)
+
+    def test_web_key_needs_key_file(self):
+        self.write_keys(self.account("DS_A", None))
+        with self.assertRaises(ConfigError) as ctx:
+            self.load()
+        self.assertIn("key_file", str(ctx.exception))
+
+    def test_missing_key_file_is_reported(self):
+        self.write_keys(self.account("DS_A", "nope.json"))
+        with self.assertRaises(ConfigError) as ctx:
+            self.load()
+        self.assertIn("nope.json", str(ctx.exception))
+
+    def test_key_file_is_forbidden_for_bearer_provider(self):
+        self.write(
+            "keys.toml",
+            '[[keys]]\nkey_name = "K1"\nprovider = "p"\nproxies = ["direct"]\n'
+            'key_file = "accounts/a.json"\n',
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self.load()
+        self.assertIn("key_file", str(ctx.exception))
+
+    def test_model_must_be_described_in_web_models(self):
+        self.write(
+            "models.toml",
+            '[[models]]\nmodel_name = "m"\nproviders = ["p"]\n'
+            '[[models]]\nmodel_name = "ghost"\nproviders = ["dsw"]\n',
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self.load()
+        self.assertIn("ghost", str(ctx.exception))
+        self.assertIn("web.models", str(ctx.exception))
+
+    def test_unknown_web_field_is_rejected(self):
+        self.write(
+            "providers.toml",
+            self.read("providers.toml").replace(
+                "chat_max_turns = 50", "chat_max_turns = 50\nbogus = 1"
+            ),
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self.load()
+        self.assertIn("bogus", str(ctx.exception))
+
+    def test_unknown_web_model_flag_is_rejected(self):
+        self.write(
+            "providers.toml",
+            self.read("providers.toml").replace(
+                "thinking = true }", "thinking = true, turbo = true }"
+            ),
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self.load()
+        self.assertIn("turbo", str(ctx.exception))
+
+    def test_bad_delete_policy_lists_valid_values(self):
+        self.write(
+            "providers.toml",
+            self.read("providers.toml").replace(
+                "chat_max_turns = 50", 'delete_policy = "always"'
+            ),
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self.load()
+        self.assertIn("abandoned", str(ctx.exception))
+
+    def test_web_style_requires_web_session_auth(self):
+        self.write(
+            "providers.toml",
+            self.read("providers.toml").replace(
+                'auth = "web_session"', 'auth = "bearer"'
+            ),
+        )
+        with self.assertRaises(ConfigError):
+            self.load()
+
+    def test_empty_models_url_is_only_for_web_session(self):
+        self.write(
+            "providers.toml",
+            self.read("providers.toml").replace(
+                'models_url = "https://api.test/v1/models"', 'models_url = ""'
+            ),
+        )
+        with self.assertRaises(ConfigError):
+            self.load()
+
+    def test_web_section_is_forbidden_for_api_provider(self):
+        self.write(
+            "providers.toml",
+            self.read("providers.toml").replace(
+                'base_url = "https://api.test/v1"',
+                'base_url = "https://api.test/v1"\nweb = { idle_timeout = 5 }',
+                1,
+            ),
+        )
+        with self.assertRaises(ConfigError):
+            self.load()
+
+    def test_two_web_accounts_on_direct_give_one_summary_warning(self):
+        self.write_keys(self.account("DS_A", "a.json"), self.account("DS_B", "b.json"))
+        warnings = [w for w in self.load().warnings if "веб-аккаунты" in w]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("DS_A", warnings[0])
+        self.assertIn("DS_B", warnings[0])
+
+    def test_web_accounts_on_separate_proxies_do_not_warn(self):
+        self.write(
+            "proxies.toml",
+            self.read("proxies.toml")
+            + '\n[proxies.p1]\nproxy_name = "p1"\nproxy_address = "127.0.0.1:1"\n',
+        )
+        self.write_keys(
+            self.account("DS_A", "a.json"),
+            self.account("DS_B", "b.json").replace('["direct"]', '["p1"]'),
+        )
+        self.assertFalse([w for w in self.load().warnings if "веб-аккаунты" in w])
+
+
+class ExamplesTests(unittest.TestCase):
+    def test_examples_load(self):
+        examples = Path(__file__).resolve().parent.parent / "examples"
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        shutil.copytree(examples, tmp / "ex")
+        # Настоящий .env в git не попадает: даём заглушки всем именам из keys.toml.
+        names = re.findall(
+            r'key_name = "(\w+)"', (tmp / "ex/models/keys.toml").read_text()
+        )
+        (tmp / "ex" / ".env").write_text("".join(f"{n}=x\n" for n in names))
+        reg = load_registry(tmp / "ex")
+        self.assertIn("deepseek_web", reg.providers)
+        route = reg.route("deepseek-web", "deepseek_web")
+        self.assertEqual(route.key_names, ("DS_EXAMPLE",))

@@ -19,3 +19,6 @@ venv/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+
+# Файлы сессий веб-аккаунтов (токены, cookie) — только локально.
+/accounts/
