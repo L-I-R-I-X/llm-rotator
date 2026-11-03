@@ -57,6 +57,7 @@ class _Outcome:
         self.finish_reason = ""
         self.message_id: int | str | None = None
         self.tool_calls: tuple[ToolCall, ...] = ()
+        self.mode = ""
         self.extra_chars = 0
         self.first_token = 0.0
         self.started = time.monotonic()
@@ -84,6 +85,7 @@ class _Outcome:
             latency=time.monotonic() - self.started,
             first_token=self.first_token,
             reasoning="".join(self.reasoning).strip(),
+            mode=self.mode,
             attempts=attempts,
         )
 
@@ -257,6 +259,7 @@ class DeepSeekWebTransport:
                 tools=tools,
             )
             record = plan.chat
+            outcome.mode = "file" if plan.attachments else plan.kind
             if plan.too_large:
                 raise WebError("too_large", plan.too_large)
             refs = self._upload(client, key, plan.attachments)
@@ -297,6 +300,7 @@ class DeepSeekWebTransport:
                     record.chat_id, None, plan.full_prompt, refs, flags=flags
                 )
                 prompt = plan.full_prompt
+                outcome.mode = "file" if plan.full_attachments else "full"
                 first = next(events)
             if tools:
                 # Вызов инструмента нельзя отдавать по кускам: сначала ответ

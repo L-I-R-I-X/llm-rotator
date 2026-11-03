@@ -1,0 +1,16 @@
+# models/clients.toml — клиенты сервиса (`llm-rotator serve`).
+#
+# У каждого харнесса свой токен → своё пространство имён → свои удалённые чаты:
+# два клиента с одинаковыми сообщениями никогда не делят чат веб-аккаунта.
+# Без этого файла работает один клиент `default` без токена, только с loopback.
+#
+# client_name   — имя клиента (namespace).
+# token_env     — переменная в .env со значением токена (Authorization: Bearer …
+#                 или x-api-key).
+# default_model — модель или `chain:<имя>` на случай, если клиент не указал
+#                 модель или указал неизвестную.
+
+[[clients]]
+client_name = "hermes"
+token_env = "CLIENT_TOKEN_HERMES"
+default_model = "chain:persona"

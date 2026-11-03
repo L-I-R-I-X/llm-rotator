@@ -32,8 +32,11 @@ dependencies = [
 dev = ["ruff>=0.6"]
 # Веб-чаты: PoW DeepSeek считается в WASM.
 web = ["wasmtime>=25"]
+# Режим сервиса: llm-rotator serve.
+server = ["starlette>=0.40", "uvicorn>=0.30"]
 
 [project.scripts]
+llm-rotator = "llm_rotator.cli:main"
 llm-rotator-discover = "llm_rotator.discovery:main"
 
 [project.urls]

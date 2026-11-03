@@ -1,0 +1,14 @@
+# systemd user unit: ~/.config/systemd/user/llm-rotator.service
+#   systemctl --user daemon-reload && systemctl --user enable --now llm-rotator
+[Unit]
+Description=llm-rotator: OpenAI-compatible gateway with key/model/proxy rotation
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/llm-rotator
+ExecStart=%h/.venvs/llm-rotator/bin/llm-rotator serve --base-dir %h/llm-rotator --port 9660
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

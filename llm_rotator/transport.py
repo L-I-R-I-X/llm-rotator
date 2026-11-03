@@ -209,6 +209,8 @@ class ChatResponse:
     reasoning: str = ""
     """Ход рассуждения, если провайдер его присылает (нестандартное поле у
     Groq и части локальных серверов). В тело следующего запроса не идёт."""
+    mode: str = ""
+    """Как веб-чат получил контекст: `delta`, `full` или `file`. У API пусто."""
     attempts: tuple[Attempt, ...] = ()
     """Неудачные попытки обхода до успешной: из них получается сноска в чате."""
     raw: object = field(default=None, repr=False, compare=False)

@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS files (
     created_at REAL NOT NULL,
     PRIMARY KEY (key_name, sha256)
 );
+CREATE TABLE IF NOT EXISTS pauses (
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    left REAL NOT NULL,
+    failures INTEGER NOT NULL DEFAULT 0,
+    saved_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS accounts (
     key_name TEXT PRIMARY KEY,
     health TEXT NOT NULL,
@@ -330,6 +337,26 @@ class ConversationStore:
             "VALUES (?,?,?,?)",
             (key_name, sha256, file_id, self._clock()),
         )
+
+    # --- паузы сессии -------------------------------------------------------
+
+    def replace_pauses(
+        self, rows: Sequence[tuple[str, str, float, int]], saved_at: float
+    ) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM pauses")
+            self._db.executemany(
+                "INSERT INTO pauses (kind, target, left, failures, saved_at) "
+                "VALUES (?,?,?,?,?)",
+                [(*row, saved_at) for row in rows],
+            )
+            self._db.commit()
+
+    def pauses(self) -> tuple[float, list[tuple[str, str, float, int]]]:
+        rows = self._all("SELECT kind, target, left, failures, saved_at FROM pauses")
+        if not rows:
+            return 0.0, []
+        return rows[0][4], [(k, t, left, f) for k, t, left, f, _ in rows]
 
     # --- аккаунты -----------------------------------------------------------
 

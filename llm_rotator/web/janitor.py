@@ -62,6 +62,9 @@ class Janitor:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
+    def set_registry(self, registry: Registry) -> None:
+        self._registry = registry
+
     # --- поток --------------------------------------------------------------
 
     def start(self) -> None:

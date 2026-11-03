@@ -277,6 +277,20 @@ class ModelRunner:
             )
         return ordered
 
+    def executor_for(self, stream: bool) -> Callable[[ChatRequest], Executor]:
+        """Фабрика исполнителя попыток для `send()`: обычный вызов или поток."""
+        return self._executor_stream if stream else self._executor
+
+    def reload(self, registry: Registry) -> None:
+        """Подменить реестр на лету (после правки keys.toml и т.п.).
+
+        Паузы и аффинити остаются: они привязаны к именам, а не к объектам.
+        """
+        self.registry = registry
+        self.gateway.registry = registry
+        if self._janitor is not None:
+            self._janitor.set_registry(registry)
+
     def _executor(self, request: ChatRequest) -> Executor:
         def attempt(route: Route, binding: Binding):
             return self.transport_for(route.provider).complete(
