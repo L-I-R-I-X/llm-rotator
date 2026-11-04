@@ -171,7 +171,7 @@ class DoctorTests(Base):
 class AuthCommandTests(Base):
     def args(self, key):
         return argparse.Namespace(
-            site="deepseek", key_name=key, base_dir=self.dir, headless=False
+            site="deepseek", name=key, base_dir=self.dir, headless=False, provider=None
         )
 
     def run_auth(self, key, session, chrome="/usr/bin/chromium", verify=0):
@@ -209,10 +209,7 @@ class AuthCommandTests(Base):
         self.assertIn("не тронут", err)
         self.assertEqual((self.dir / "accounts" / "ok.json").read_text(), before)
 
-    def test_unknown_key_and_api_key_are_rejected(self):
-        code, _, err, _ = self.run_auth("NOPE", login.SessionData("t", "c"))
-        self.assertEqual(code, 1)
-        self.assertIn("API_OK", err)
+    def test_api_key_is_rejected_as_not_deepseek(self):
         code, _, err, _ = self.run_auth("API_OK", login.SessionData("t", "c"))
         self.assertEqual(code, 1)
         self.assertIn("не DeepSeek", err)
