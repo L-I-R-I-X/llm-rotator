@@ -71,6 +71,31 @@ class ReferenceParserTests(unittest.TestCase):
         self.assertIsNotNone(T.known_call(T.parse_tool_call(CALL), TOOLS))
 
 
+class TruncatedEnvelopeTests(unittest.TestCase):
+    """Модель потеряла последние `}` вызова: это всё ещё вызов, а не текст."""
+
+    BODY = '{"tool_call":{"name":"write_file","arguments":{"path":"/a","content":"x\\ny \\"q\\" {z}"'
+
+    def test_missing_closers_are_added(self):
+        for missing in ("}", "}}", "}}}"):
+            call = T.parse_tool_call(self.BODY + missing)
+            self.assertIsNotNone(call, missing)
+            self.assertEqual(call.name, "write_file")
+            self.assertEqual(call.arguments["content"], 'x\ny "q" {z}')
+
+    def test_cut_inside_a_string_or_after_a_comma_is_text(self):
+        for text in (
+            self.BODY[:-8],
+            '{"tool_call":{"name":"w","arguments":{"p":"x",',
+            '{"tool_call":{"name":"w","arguments":{"p":"x"',
+        ):
+            self.assertIsNone(T.parse_tool_call(text), text)
+
+    def test_too_many_missing_closers_is_text(self):
+        text = '{"tool_call":{"name":"w","arguments":{"p":{"q":[{"r":1}'
+        self.assertIsNone(T.parse_tool_call(text))
+
+
 class PromptTests(unittest.TestCase):
     def test_definitions_list_functions_and_format(self):
         text = T.format_tool_definitions(TOOLS, 200_000)

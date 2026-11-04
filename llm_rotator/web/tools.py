@@ -424,6 +424,42 @@ def coerce_tool_call_object(obj: object, allow_bare: bool = False) -> ParsedCall
     )
 
 
+MAX_MISSING_CLOSERS = 3
+
+
+def close_truncated_json(raw: str) -> str | None:
+    """Достраивает недостающие закрывающие скобки в хвосте JSON.
+
+    Модель иногда пишет вызов целиком, но теряет последнюю `}`. Достраиваем
+    только когда строка закончена, хвост уже состоит из закрывающих скобок
+    (модель пыталась закрыть вызов) и не хватает не больше трёх. Обрыв посреди
+    строки или после запятой не чиним: это не вызов, а недописанный ответ.
+    """
+    text = raw.rstrip()
+    if not text.startswith("{") or text[-1] not in "}]":
+        return None
+    stack: list[str] = []
+    in_string = escape = False
+    for ch in text:
+        if escape:
+            escape = False
+        elif in_string:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack or stack.pop() != ch:
+                return None
+    if in_string or not stack or len(stack) > MAX_MISSING_CLOSERS:
+        return None
+    return text + "".join(reversed(stack))
+
+
 def _json_candidate(raw: str, allow_bare: bool = False) -> ParsedCall | None:
     if not raw:
         return None
@@ -833,6 +869,23 @@ def parse_tool_call(text: str) -> ParsedCall | None:
         call = _json_candidate(raw_json)
         if call:
             return call
+    return _repair_truncated(scan)
+
+
+def _repair_truncated(scan: str) -> ParsedCall | None:
+    """Конверт вызова без последних `}`: достраиваем и разбираем."""
+    match = _ENVELOPE_KEY.search(scan)
+    if not match:
+        return None
+    start = scan.rfind("{", 0, match.start() + 1)
+    while start != -1:
+        closed = close_truncated_json(scan[start:])
+        call = _json_candidate(closed) if closed else None
+        if call:
+            return call
+        start = scan.rfind("{", 0, start)
+        if match.start() - start > 64:
+            break
     return None
 
 
