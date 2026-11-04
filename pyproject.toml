@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-rotator"
-version = "0.3.0"
+version = "0.3.1"
 description = "Ротация API-ключей, моделей и прокси для OpenAI-совместимых LLM-провайдеров"
 readme = "README.md"
 requires-python = ">=3.11"
